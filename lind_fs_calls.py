@@ -24,8 +24,6 @@ SUPERBLOCKFNAME = PREFIX+'0'
 #Blocks 1-25
 STARTFREE = 1
 ENDFREE = 25
-#Each block in the free block list consists of two groups of block numbers
-FREELIST,USEDSET = 0,1
 freeblocklist = []
 
 #Blocks 26-9999
@@ -177,17 +175,17 @@ def _blank_fs_init():
   #freeblocklist
   numFree = ENDFREE - STARTFREE + 1
 
-  #first block in the free-block list contains 27-400
+  #first block in the free-block list contains 27-399
   whichBlock,nextToHit = ROOTINODE+1,NUMNUM
 
   for i in range(numFree):
-    x = ([],set())
-    for j in range(whichBlock,nextToHit+1):
+    x = []
+    for j in range(whichBlock,nextToHit):
       #Blocks 27-9999 start empty
-      x[FREELIST].append(j)
+      x.append(j)
       whichBlock += 1
       pass
-    #second contains 401 to 800, etc.
+    #second contains 400 to 799, etc.
     nextToHit += NUMNUM
     freeblocklist.append(x)
 
@@ -207,14 +205,18 @@ def persist(block, fname):
   datafo.close()
   pass
 
-def findBlockDetailed(inode):
-  #Given (the block number of) an inode,
+def findBlockDetailed(blockNum):
   #return the block, the array it is in (if any), and its index in that array
-  if inode == 0: block, targetArray, index = superblock, None, None
-  elif inode == ROOTINODE: block, targetArray, index = rootblock, blocks, 0
+
+  #the superblock is not in any array
+  if blockNum == 0: block, targetArray, index = superblock, None, None
+
+  #the root inode/dir is in the blocks array, at the first spot
+  elif blockNum == ROOTINODE: block, targetArray, index = rootblock, blocks, 0
+
   else:
     #Free block list
-    if inode >= STARTFREE and inode <= ENDFREE:
+    if blockNum >= STARTFREE and blockNum <= ENDFREE:
       targetArray, offset = freeblocks, 1
       pass
 
@@ -222,17 +224,17 @@ def findBlockDetailed(inode):
     else:
       #add to blocks if it isn't as big as we need
       targetArray, offset = blocks, ROOTINODE
-      while len(blocks) <= (inode-offset): blocks.append({})
+      while len(blocks) <= (blockNum-offset): blocks.append({})
       pass
 
-    index = inode - offset
+    index = blockNum - offset
     block = targetArray[index]
     pass
 
   return block, targetArray, index
 
 #Just gimme the dictionary
-def findBlock(inode): return findBlockDetailed(inode)[0]
+def findBlock(blockNum): return findBlockDetailed(blockNum)[0]
 
 def restore(fname):
   dotIndex = fname.index('.')
@@ -293,10 +295,8 @@ def findNextFree():
   for i in range(ENDFREE-STARTFREE+1):
     if len(freeblocklist[i][FREELIST]) > 0:
       #pick smallest element from the free list
-      blockNum = freeblocklist[i][FREELIST][0]
-      del freeblocklist[i][FREELIST][0:1]      
-      #move to used set
-      freeblocklist[i][USEDSET].add(blockNum)
+      blockNum = freeblocklist[i][0]
+      del freeblocklist[i][0:1]
       #return the number
       return blockNum
     pass
@@ -311,11 +311,10 @@ def allocate():
 
 def freeBlock(blockNum):
   #free up the piece of memory that has this number
-  x = freeblocklist[(blockNum-1)/NUMNUM] #27-400 are in 0, 401-800 are in 1, etc.
-  x[USEDSET].remove(blockNum)
+  x = freeblocklist[blockNum/NUMNUM] #27-399 are in 0, 400-799 are in 1, etc.
   #Add to the list of free blocks
   #runs in linear time... would be better if tree/heap were used
-  #but worry about this later
+  #but we cant use modules (like Queue), which sucks
   loc = 0
   while x[FREELIST][loc] < blockNum: loc += 1
   x[FREELIST].insert(loc,blockNum)
@@ -509,10 +508,6 @@ def chdir_syscall(path):
   """ 
     http://linux.die.net/man/2/chdir
   """
-
-  # Note: I don't think I need locking here.   I don't modify any state and 
-  # only check the fs state once...
-
   # get the actual name.   Remove things like '../foo'
   truepath = _get_absolute_path(path)
 
@@ -523,7 +518,6 @@ def chdir_syscall(path):
   # let's update and return success (0)
   currentDir['value'] = truepath
   return 0
-
 
 ##### MKDIR  #####
 
@@ -620,9 +614,6 @@ def rmdir_syscall(path):
     parentinode = path2inode[trueparentpath]
     parentBlock = findBlock(parentinode)
 
-    #mark as free
-    freeBlock(thisinode)
-
     # We're ready to go!   Let's clean up the file entry
     dirname = 'd'+truepath.split('/')[-1]
 
@@ -632,8 +623,12 @@ def rmdir_syscall(path):
     # decrement the link count on the dir...
     parentBlock['linkcount'] -= 1
 
+    #mark as free
+    freeBlock(thisinode)
+
     # finally, clean up the path2inode and return success!!!
     del path2inode[truepath]
+
     return 0
 
   finally:
@@ -642,8 +637,6 @@ def rmdir_syscall(path):
 
 
 ##### LINK  #####
-
-
 def link_syscall(oldpath, newpath):
   """ 
     http://linux.die.net/man/2/link
@@ -711,9 +704,6 @@ def link_syscall(oldpath, newpath):
     superblocklock.release()
 
 ##### UNLINK  #####
-
-
-
 def unlink_syscall(path):
   """ 
     http://linux.die.net/man/2/unlink
@@ -774,10 +764,7 @@ def unlink_syscall(path):
     superblocklock.release()
 
 
-
-
 ##### STAT  #####
-
 def stat_syscall(path):
   """ 
     http://linux.die.net/man/2/stat
@@ -876,7 +863,6 @@ def _istat_helper(inode):
 
 ##### OPEN  #####
 
-
 # get the next free file descriptor
 def get_next_fd():
   # let's get the next available fd number.   The standard says we need to 
@@ -902,7 +888,6 @@ def open_syscall(path, flags, mode):
   """ 
     http://linux.die.net/man/2/open
   """
-
   # in an abundance of caution, lock...   I think this should only be needed
   # with O_CREAT flags...
   superblocklock.acquire(True)
@@ -913,16 +898,16 @@ def open_syscall(path, flags, mode):
       raise SyscallError("open_syscall","ENOENT","The file does not exist.")
 
     truepath = _get_absolute_path(path)
+    made = False
 
     # is the file missing?
     if truepath not in path2inode:
 
-      # did they use O_CREAT?
+      # did they use O_CREAT? If not, throw error
       if not O_CREAT & flags:
         raise SyscallError("open_syscall","ENOENT","The file does not exist.")
       
-      # okay, it doesn't exist (great!).   Does it's parent exist and is it a 
-      # dir?
+      # okay, it doesn't exist (great!). Does its parent exist and is it a dir?
       trueparentpath = _get_absolute_parent_path(path)
 
       if trueparentpath not in path2inode:
@@ -937,25 +922,25 @@ def open_syscall(path, flags, mode):
 
       # first, make the new file's entry...
       newinode = allocate()
+      #we have one level of indirection
       secondaryNode = allocate()
 
-      # be sure there aren't extra mode bits...   No errno seems to exist for 
-      # this.
+      # be sure there aren't extra mode bits... No errno seems to exist for this.
       assert(mode & (S_IRWXA|S_FILETYPEFLAGS) == mode)
-
       effective_mode = (S_IFCHR | mode) if (S_IFCHR & flags) != 0 else (S_IFREG | mode)
 
       newinodeentry = {'size':0, 'uid':DEFAULT_UID, 'gid':DEFAULT_GID, 
                        'mode':effective_mode,
+                       #initially assume we can fit data into one block, growing when necessary
                        'indirect':False, 'location': secondaryNode,
                        'atime':DEFAULT_TIME, 'ctime':DEFAULT_TIME, 'mtime':DEFAULT_TIME,
                        'linkcount':1}
-    
+
       # ... and put it in the table..
       blocks[newinode-ROOTINODE] = newinodeentry
       
-      parentBlock = findBlock(parentinode)
       # let's make the parent point to it...
+      parentBlock = findBlock(parentinode)
       parentBlock['filename_to_inode_dict'][filename] = newinode
       # ... and increment the link count on the dir...
       parentBlock['linkcount'] += 1
@@ -965,15 +950,18 @@ def open_syscall(path, flags, mode):
 
       # this file must not exist or it's an internal error!!!
       openfile(PREFIX+str(newinode),True).close()
+      
+      #We made a new file
+      made = True
 
-    # if the file did exist, were we told to create with exclusion?
+    # if the file did exist...
     else:
-      # did they use O_CREAT and O_EXCL?
+      # did they use O_CREAT and O_EXCL? If so, throw error
       if O_CREAT & flags and O_EXCL & flags:
         raise SyscallError("open_syscall","EEXIST","The file exists.")
 
-      # This file should be removed.   If O_RDONLY is set, the behavior
-      # is undefined, so this is okay, I guess...
+      #If we are truncating the file, we are erasing before opening
+      # If O_RDONLY is set, the behavior is undefined, so this is okay
       if O_TRUNC & flags:
         inode = path2inode[truepath]
         block = findBlock(inode)
@@ -982,6 +970,7 @@ def open_syscall(path, flags, mode):
         secondaryBlock = findBlock(secondaryInode)#the actual index block OR data
 
         #Make file objects for all linddata.X that contain data
+        #makeFileObject will destroy existing blocks and create blank replacements
         if block['indirect']:
           for loc in secondaryBlock['location']: makeFileObject(loc)
           pass
@@ -989,7 +978,6 @@ def open_syscall(path, flags, mode):
 
         # reset the size to 0
         block['size'] = 0
-
         pass
 
     # TODO: I should check permissions...
@@ -1006,10 +994,12 @@ def open_syscall(path, flags, mode):
     # actually open something in this case...
     # Is it a regular file?
     if IS_REG(block['mode']):
-      # this is a regular file.  If it's not open, let's open it! 
-      if inode not in fileobjecttable:
-        thisfo = openfile(PREFIX+str(inode),False)
-        fileobjecttable[inode] = thisfo
+      # this is a regular file. 
+      #If the file never existed before this function call, store in f.o.t
+      if made:
+        dataBlockNum = block['location'] #we assumed the file fits in 1 block
+        thisfo = openfile(PREFIX+str(dataBlockNum),False)
+        fileobjecttable[dataBlockNum] = thisfo
         pass
       pass
 
@@ -1038,27 +1028,22 @@ def creat_syscall(pathname, mode):
   """ 
     http://linux.die.net/man/2/creat
   """
-
   try: return open_syscall(pathname, O_CREAT | O_TRUNC | O_WRONLY, mode)
-  
   except SyscallError, e:
     # If it's a system call error, return our call name instead.
     assert(e[0]=='open_syscall')
     raise SyscallError('creat_syscall',e[1],e[2])
 
-
 ##### LSEEK  #####
-
 def lseek_syscall(fd, offset, whence):
   """ 
     http://linux.die.net/man/2/lseek
   """
-
   # check the fd
   if fd not in filedescriptortable:
     raise SyscallError("lseek_syscall","EBADF","Invalid file descriptor.")
 
-  # if we are any of the odd handles(stderr, sockets), we cant seek, so just report we are at 0
+  # if we are any of the lower handles(stderr, sockets), cant seek, just report 0
   if filedescriptortable[fd]['inode'] in [0,1,2]: return 0
 
   # Acquire the fd lock...
@@ -1136,7 +1121,6 @@ def read_syscall(fd, count):
 
   # ... but always release it...
   try:
-
     # get the inode so I can and check the mode (type)
     inode = filedescriptortable[fd]['inode']
     block = findBlock(inode)
@@ -1157,20 +1141,19 @@ def read_syscall(fd, count):
     #If indirect...
     else:
       filesize = block['size']
-
       #throw error if you can't read that many bytes
       if filesize-position < count:
         raise SyscallError("read_syscall","foobar...","Can't read that many bytes from that position")
         pass
-      data = ""
 
+      data = ""
       #find which block to start from and the position within that block
       startIndex,modPosition = position / BLOCKSIZE, position % BLOCKSIZE
       blockNumbers = findBlock(block['location'])#a list of numbers
-      for otherInode in blockNumbers[startIndex:]:
+      for blockNum in blockNumbers[startIndex:]:
         #bytes left in this block
         bytesLeft = BLOCKSIZE - modPosition
-        data += fileobjecttable[otherInode].readat(min(bytesLeft,count),modPosition)
+        data += fileobjecttable[blockNum].readat(min(bytesLeft,count),modPosition)
         modPosition = 0
         count -= bytesLeft
         if count == 0: break
@@ -1229,55 +1212,6 @@ def write_syscall(fd, data):
     
     # and the file size...
     filesize = block['size']
-    #technically, the following variable just keeps track of the last byte changed, not necessarily size
-    newsize = len(data) + position
-
-    #New size of the file must not exceed the limit
-    if newsize > BLOCKSIZE*NUMNUM: raise SyscallError("write_syscall","foobar...","File too big")
-
-    #How many blocks does the newsize need?
-    neededBlocks = (newsize / BLOCKSIZE) + 1
-
-    #If new size of file is bigger than current one...
-    if newsize > filesize:
-      #keep as direct
-      if newsize <= BLOCKSIZE: pass
-      else:
-        #change to indirect if necessary
-        if filesize <= BLOCKSIZE:
-          block['indirect'] = True
-          oldLoc = block['location']
-          indexLoc = allocate()
-          block['location'] = indexLoc
-          blocks[indexLoc-ROOTINODE] = [oldLoc]
-          pass
-
-        #Add needed blocks
-        index = blocks[indexLoc-ROOTINODE]
-        while len(index) < neededBlocks:
-          index.append(allocate())
-          makeFileObject(index[-1])
-          pass
-        pass
-      pass
-
-    #Otherwise, no need to grow
-    #clip off excess blocks
-    elif block['indirect'] == True:
-      indexLoc = block['location']
-      index = findBlock(indexLoc)
-      while len(index) > neededBlocks:
-        freeBlock(index[-1])
-        fileobjecttable[index[-1]].close()
-        del fileobjecttable[index[-1]]
-        index.pop()
-        pass
-      if len(index) == 1:
-        block['indirect'] = False
-        block['location'] = index[0]
-        freeBlock(indexLoc)
-        pass
-      pass
 
     #actually write the data
     if block['indirect']:
@@ -1683,7 +1617,7 @@ def truncate_syscall(path, length):
 
 
 #### FTRUNCATE ####
-def ftruncate_syscall(fd, new_len):
+def ftruncate_syscall(fd, newsize):
   """
     http://linux.die.net/man/2/ftruncate
   """
@@ -1691,7 +1625,7 @@ def ftruncate_syscall(fd, new_len):
   if fd not in filedescriptortable and fd >= STARTINGFD:
     raise SyscallError("ftruncate_syscall","EBADF","Invalid old file descriptor.")
 
-  if new_len < 0:
+  if newsize < 0:
     raise SyscallError("ftruncate_syscall", "EINVAL", "Incorrect length passed.")
 
   # Acquire the fd lock...
@@ -1700,34 +1634,78 @@ def ftruncate_syscall(fd, new_len):
 
   try: 
     # we will need the file size in a moment, but also need to check the type
-    try:
-      inode = desc['inode']
-    except KeyError:
-      raise SyscallError("lseek_syscall","ESPIPE","This is a socket, not a file.")
+    try: inode = desc['inode']
+    except KeyError: raise SyscallError("lseek_syscall","ESPIPE","This is a socket, not a file.")
 
     block = findBlock(inode)
     filesize = block['size']
 
-    if filesize < new_len:
-      # we must pad with zeros
-      blankbytecount = new_len - filesize 
-      fileobjecttable[inode].writeat('\0'*blankbytecount,filesize)
-      
-    else:
-      # we must cut
-      to_save = fileobjecttable[inode].readat(new_len,0)
-      fileobjecttable[inode].close()
+    #New size of the file must not exceed the limit
+    if newsize > BLOCKSIZE*NUMNUM: raise SyscallError("write_syscall","EDQUOT","File too big")
+
+    #How many blocks does the newsize need?
+    neededBlocks = (newsize / BLOCKSIZE) + 1
+
+    #If new size of file is bigger than current one...
+    if newsize > filesize:
+
+      #direct stays as direct if the new size fits in one block
+      #unused bytes in the block are already \0
+      if newsize <= BLOCKSIZE: pass
+
+      else:
+        #if we're a direct block, change to indirect
+        if not block['indirect']:
+          block['indirect'] = True
+          #'location' slot in block now points to the index block
+          #old data remains, but pointed to by the index block
+          oldLoc = block['location']
+          indexLoc = allocate()#where the index block will be
+          block['location'] = indexLoc
+          blocks[indexLoc-ROOTINODE] = [oldLoc]#index = list of numbers
+          pass
+
+        #Add needed blocks
+        index = blocks[indexLoc-ROOTINODE]
+        while len(index) < neededBlocks:
+          index.append(allocate())
+          makeFileObject(index[-1])#pre-filled with zeroes
+          pass
+        pass
+      pass
+
+    #Otherwise, no need to grow
+    #clip off excess blocks
+    elif block['indirect'] == True:
+      indexLoc = block['location']
+      index = findBlock(indexLoc)
+      while len(index) > neededBlocks:
+        freeBlock(index[-1])
+        fileobjecttable[index[-1]].close()
+        del fileobjecttable[index[-1]]
+        index.pop()
+        pass
+      if len(index) == 1:
+        block['indirect'] = False
+        block['location'] = index[0]
+        freeBlock(indexLoc)
+        pass
+      pass
+
+    else: #newsize < filesize and direct
+      dataBlockNum = block['location']
+      to_save = fileobjecttable[dataBlockNum].readat(newsize,0)
+      fileobjecttable[dataBlockNum].close()
       # remove the old file
       removefile(PREFIX+str(inode))
       # make a new blank one
-      fileobjecttable[inode] = openfile(PREFIX+str(inode),True)
-      fileobjecttable[inode].writeat(to_save, 0)
+      fileobjecttable[dataBlockNum] = openfile(PREFIX+str(dataBlockNum),True)
+      fileobjecttable[dataBlockNum].writeat(to_save, 0)
       pass
       
     block['size'] = new_len
         
-  finally:
-    desc['lock'].release() 
+  finally: desc['lock'].release() 
 
   return 0
 
