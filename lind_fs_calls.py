@@ -1210,8 +1210,8 @@ def write_syscall(fd, data):
     position = filedescriptortable[fd]['position']
     if position < 0: raise SyscallError("write_syscall","foobar...","Please lseek to a positive number")
     
-    # and the file size...
-    filesize = block['size']
+    #resize to fit our aims
+    ftruncate_syscall(fd, position+len(data))
 
     #actually write the data
     if block['indirect']:
@@ -1596,7 +1596,7 @@ def chmod_syscall(path, mode):
 
     # should overwrite any previous permissions, according to POSIX.   However,
     # we want to keep the 'type' part of the mode from before
-    block['mode'] = (block['mode'] &~S_IRWXA) | mode
+    block['mode'] = (block['mode'] & ~S_IRWXA) | mode
 
   finally:
     persist(superblock,SUPERBLOCKFNAME)
@@ -1626,7 +1626,7 @@ def ftruncate_syscall(fd, newsize):
     raise SyscallError("ftruncate_syscall","EBADF","Invalid old file descriptor.")
 
   if newsize < 0:
-    raise SyscallError("ftruncate_syscall", "EINVAL", "Incorrect length passed.")
+    raise SyscallError("ftruncate_syscall","EINVAL","Incorrect length passed.")
 
   # Acquire the fd lock...
   desc = filedescriptortable[fd]
@@ -1637,20 +1637,20 @@ def ftruncate_syscall(fd, newsize):
     try: inode = desc['inode']
     except KeyError: raise SyscallError("lseek_syscall","ESPIPE","This is a socket, not a file.")
 
+    #New size of the file must not exceed the limit
+    if newsize > BLOCKSIZE*NUMNUM: raise SyscallError("ftruncate_syscall","EDQUOT","File too big")
+
     block = findBlock(inode)
     filesize = block['size']
 
-    #New size of the file must not exceed the limit
-    if newsize > BLOCKSIZE*NUMNUM: raise SyscallError("write_syscall","EDQUOT","File too big")
-
     #How many blocks does the newsize need?
-    neededBlocks = (newsize / BLOCKSIZE) + 1
+    neededBlocks = (newsize / BLOCKSIZE) + (1 if newsize % BLOCKSIZE else 0)
 
     #If new size of file is bigger than current one...
     if newsize > filesize:
 
       #direct stays as direct if the new size fits in one block
-      #unused bytes in the block are already \0
+      #happily, unused bytes in the block are already \0
       if newsize <= BLOCKSIZE: pass
 
       else:
