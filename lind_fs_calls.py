@@ -14,7 +14,9 @@ DEFAULT_TIME = 1323630836
 NEW_TIME = 1423630836
 DEVID = 20
 PREFIX = 'linddata.'
-#number of block-numbers a block can point to
+
+#number of block numbers a block can point to
+#used for free block list and index blocks
 NUMNUM = 400
 
 #Block 0
@@ -22,8 +24,7 @@ superblock = {}
 SUPERBLOCKFNAME = PREFIX+'0'
 
 #Blocks 1-25
-STARTFREE = 1
-ENDFREE = 25
+STARTFREE, ENDFREE = 1,25
 freeblocklist = []
 
 #Blocks 26-9999
@@ -33,10 +34,10 @@ ROOTBLOCKFNAME = PREFIX+str(ROOTINODE)
 blocks = [rootblock]
 
 # A lock that prevents inconsistencies
-superblocklock = createlock()
+theLock = createlock()
 
 # fast lookup table...
-#maps [path from root] to [block number of inode]
+#maps [path from root] to [block number of inode (file or dir)]
 path2inode = {}
 
 # contains open file descriptor information... (keyed by fd)
@@ -49,6 +50,7 @@ fileobjecttable = {}
 # without using global, which is blocked by RepyV2
 currentDir = {'value':'/'}
 
+#I want to see the errors!
 SILENT=False
 
 def warning(*msg):
@@ -113,7 +115,7 @@ def load_fs_special_files():
   Specifically /dev/null, /dev/urandom and /dev/random
   """
   try: 
-     mkdir_syscall("/dev", S_IRWXA)
+    mkdir_syscall("/dev", S_IRWXA)
   except SyscallError as e:
     warning( "making /dev failed. Skipping",str(e))
 
@@ -157,7 +159,7 @@ def _blank_fs_init():
   superblock['freeStart'] = STARTFREE
   superblock['freeEnd'] = ENDFREE
   superblock['maxBlocks'] = MAXBLOCKS
-  persist(rootblock,ROOTBLOCKFNAME)
+  persist(superblock,SUPERBLOCKFNAME)
 
   #root block
   rootblock['size'] = 0
@@ -169,22 +171,20 @@ def _blank_fs_init():
   rootblock['mtime'] = DEFAULT_TIME
   rootblock['linkcount'] = 2 # the number of dir entries...
   rootblock['filename_to_inode_dict'] = {'d.':ROOTINODE,'d..':ROOTINODE}
-  persist(superblock,SUPERBLOCKFNAME)
+  persist(rootblock,ROOTBLOCKFNAME)
   path2inode['/'] = ROOTINODE
 
   #freeblocklist
-  numFree = ENDFREE - STARTFREE + 1
+  #start right after root (means 27), end just before 400 (means 399)
+  currentBlock,nextToHit = ROOTINODE+1,NUMNUM
 
-  #first block in the free-block list contains 27-399
-  whichBlock,nextToHit = ROOTINODE+1,NUMNUM
-
-  for i in range(numFree):
+  for i in range(ENDFREE - STARTFREE + 1):
     x = []
-    for j in range(whichBlock,nextToHit):
-      #Blocks 27-9999 start empty
+    for j in range(currentBlock,nextToHit):
       x.append(j)
-      whichBlock += 1
+      currentBlock += 1
       pass
+
     #second contains 400 to 799, etc.
     nextToHit += NUMNUM
     freeblocklist.append(x)
@@ -250,7 +250,10 @@ def restore(fname):
   datafo.close()
 
   # get what we stored
-  data = deserializedata(datastring)
+  try: data = deserializedata(datastring)
+  #If we cannot deserialize, it means the block is "pure data" (a file)
+  #which will be modified via syscalls (read/write/trunc, etc.)
+  except: return
 
   if fname in (ROOTBLOCKFNAME, SUPERBLOCKFNAME):
     # I need to put things in the dict, but it's not a global...   so instead
@@ -264,7 +267,7 @@ def restore(fname):
   pass
 
 #path is already added.
-def _recursive_rebuild_path2inode_helper(path, inode):
+def _rebuild_path2inode_helper(path, inode):
   # for each entry in my table...
   for entryname,entryinode in blocks[inode-ROOTINODE]['filename_to_inode_dict'].iteritems():
     if entryname in ('d.','d..'): continue
@@ -275,7 +278,7 @@ def _recursive_rebuild_path2inode_helper(path, inode):
 
     # and recurse if a directory...
     if entryname[0] == 'd':
-      _recursive_rebuild_path2inode_helper(entryPath,entryinode)
+      _rebuild_path2inode_helper(entryPath,entryinode)
       pass
     pass
 
@@ -285,7 +288,7 @@ def _rebuild_path2inode():
   #I need to add the root.   
   path2inode['/'] = ROOTINODE
   #recursively do the rest...
-  _recursive_rebuild_path2inode_helper('', ROOTINODE)
+  _rebuild_path2inode_helper('', ROOTINODE)
   pass
 
 ######################   Generic Helper functions   #########################
@@ -316,8 +319,8 @@ def freeBlock(blockNum):
   #runs in linear time... would be better if tree/heap were used
   #but we cant use modules (like Queue), which sucks
   loc = 0
-  while x[FREELIST][loc] < blockNum: loc += 1
-  x[FREELIST].insert(loc,blockNum)
+  while x[loc] < blockNum: loc += 1
+  x.insert(loc,blockNum)
   pass
 
 # private helper function that converts a relative path or a path with things
@@ -325,13 +328,13 @@ def freeBlock(blockNum):
 def _get_absolute_path(path):
   
   # should raise an ENOENT error...
-  if path == '': return path
+  if path == '': raise SyscallError('','ENOENT','There is no such thing as a nameless entry, dummy')
+    #return path
 
   # If it's a relative path, prepend the CWD...
   if path[0] != '/': path = currentDir['value'] + '/' + path
 
-  # now I'll split on '/'.   This gives a list like: ['','foo','bar'] for 
-  # '/foo/bar'
+  #Splitting on '/' gives a list like: ['','foo','bar'] for '/foo/bar'
   pathlist = path.split('/')
 
   # let's remove the leading ''
@@ -371,9 +374,8 @@ def _get_absolute_path(path):
         del pathlist[position]
         continue
 
-    else:
-      # it's a normal entry...   move along...
-      position = position + 1
+    # it's a normal entry...   move along...
+    else: position += 1
 
   # now let's join the pathlist!
   return '/'+'/'.join(pathlist)
@@ -450,7 +452,7 @@ def statfs_syscall(path):
     http://linux.die.net/man/2/statfs
   """
   # in an abundance of caution, I'll grab a lock...
-  superblocklock.acquire(True)
+  theLock.acquire(True)
 
   # ... but always release it...
   try:
@@ -465,7 +467,7 @@ def statfs_syscall(path):
     return _istatfs_helper(thisinode)
 
   finally:
-    superblocklock.release()
+    theLock.release()
 
 ##### ACCESS  #####
 
@@ -475,7 +477,7 @@ def access_syscall(path, amode):
   """
   try:
     # lock to prevent things from changing while we look this up...
-    superblocklock.acquire(True)
+    theLock.acquire(True)
 
     # get the actual name.   Remove things like '../foo'
     truepath = _get_absolute_path(path)
@@ -498,7 +500,7 @@ def access_syscall(path, amode):
   finally:
     persist(superblock,SUPERBLOCKFNAME)
     # release the lock
-    superblocklock.release()
+    theLock.release()
     pass
   pass
 
@@ -526,7 +528,7 @@ def mkdir_syscall(path, mode):
     http://linux.die.net/man/2/mkdir
   """
   # lock to prevent things from changing while we look this up...
-  superblocklock.acquire(True)
+  theLock.acquire(True)
 
   # ... but always release it...
   try:
@@ -575,7 +577,7 @@ def mkdir_syscall(path, mode):
 
   finally:
     persist(superblock,SUPERBLOCKFNAME)
-    superblocklock.release()
+    theLock.release()
 
 ##### RMDIR  #####
 
@@ -585,7 +587,7 @@ def rmdir_syscall(path):
   """
 
   # lock to prevent things from changing while we look this up...
-  superblocklock.acquire(True)
+  theLock.acquire(True)
 
   # ... but always release it...
   try:
@@ -633,7 +635,7 @@ def rmdir_syscall(path):
 
   finally:
     persist(superblock,SUPERBLOCKFNAME)
-    superblocklock.release()
+    theLock.release()
 
 
 ##### LINK  #####
@@ -643,7 +645,7 @@ def link_syscall(oldpath, newpath):
   """
 
   # lock to prevent things from changing while we look this up...
-  superblocklock.acquire(True)
+  theLock.acquire(True)
 
   # ... but always release it...
   try:
@@ -701,7 +703,7 @@ def link_syscall(oldpath, newpath):
 
   finally:
     persist(superblock,SUPERBLOCKFNAME)
-    superblocklock.release()
+    theLock.release()
 
 ##### UNLINK  #####
 def unlink_syscall(path):
@@ -710,7 +712,7 @@ def unlink_syscall(path):
   """
 
   # lock to prevent things from changing while we do this...
-  superblocklock.acquire(True)
+  theLock.acquire(True)
 
   # ... but always release it...
   try:
@@ -761,7 +763,7 @@ def unlink_syscall(path):
 
   finally:
     persist(superblock,SUPERBLOCKFNAME)
-    superblocklock.release()
+    theLock.release()
 
 
 ##### STAT  #####
@@ -770,7 +772,7 @@ def stat_syscall(path):
     http://linux.die.net/man/2/stat
   """
   # in an abundance of caution, I'll grab a lock...
-  superblocklock.acquire(True)
+  theLock.acquire(True)
 
   # ... but always release it...
   try:
@@ -790,7 +792,7 @@ def stat_syscall(path):
 
   finally:
     persist(superblock,SUPERBLOCKFNAME)
-    superblocklock.release()
+    theLock.release()
 
 
 ##### FSTAT  #####
@@ -890,7 +892,7 @@ def open_syscall(path, flags, mode):
   """
   # in an abundance of caution, lock...   I think this should only be needed
   # with O_CREAT flags...
-  superblocklock.acquire(True)
+  theLock.acquire(True)
 
   # ... but always release it...
   try:
@@ -1018,7 +1020,7 @@ def open_syscall(path, flags, mode):
 
   finally:
     persist(superblock,SUPERBLOCKFNAME)
-    superblocklock.release()
+    theLock.release()
 
 
 
@@ -1579,7 +1581,7 @@ def chmod_syscall(path, mode):
     http://linux.die.net/man/2/chmod
   """
   # in an abundance of caution, I'll grab a lock...
-  superblocklock.acquire(True)
+  theLock.acquire(True)
 
   # ... but always release it...
   try:
@@ -1600,7 +1602,7 @@ def chmod_syscall(path, mode):
 
   finally:
     persist(superblock,SUPERBLOCKFNAME)
-    superblocklock.release()
+    theLock.release()
   return 0
 
 #### TRUNCATE  ####
@@ -1934,7 +1936,7 @@ def rename_syscall(old, new):
   http://linux.die.net/man/2/rename
   TODO: this needs to be fixed up.
   """
-  superblocklock.acquire(True)
+  theLock.acquire(True)
   try:
     true_old_path = _get_absolute_path(old)
     true_new_path = _get_absolute_path(new)
@@ -1961,5 +1963,5 @@ def rename_syscall(old, new):
     del path2inode[true_old_path]
 
   finally:
-    superblocklock.release()
+    theLock.release()
   return 0
