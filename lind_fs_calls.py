@@ -1173,6 +1173,18 @@ def read_syscall(fd, count):
 
 
 ##### WRITE  #####
+def persistFile(block, blockNum):
+
+  #persist index block if it exists
+  if block['indirect']:
+    indexLoc = block['location']
+    persist(blocks[indexLoc-ROOTINODE],indexLoc)
+    pass
+
+  #persist file's inode
+  persist(block,inode)
+  pass
+
 
 def write_syscall(fd, data):
   """ 
@@ -1241,6 +1253,8 @@ def write_syscall(fd, data):
     # update the file size if we've extended it
     if filedescriptortable[fd]['position'] > filesize:
       block['size'] = filedescriptortable[fd]['position']
+
+    persistFile(block,inode)
       
     # we always write it all, so just return the length of what we were passed.
     # We do not mention whether we write blank data (if position is after the 
@@ -1316,9 +1330,19 @@ def _close_helper(fd):
     return 0
 
   # now let's close it and remove it from the table
-  fileobjecttable[inode].close()
+  if block['indirect']:
+    indexLoc = block['location']
+    index = blocks[indexLoc-ROOTINODE]
+    for blockNum in index:
+      fileobjecttable[blockNum].close()
+      del fileobjecttable[blockNum]
+      pass
+    pass
 
-  del fileobjecttable[inode]
+  else:
+    fileobjecttable[block['location']].close()
+    del fileobjecttable[block['location']]
+    pass
 
   # success!
   return 0
@@ -1346,15 +1370,12 @@ def close_syscall(fd):
 
   finally:
     # ... release the lock, if there is one
-    persist(superblock,SUPERBLOCKFNAME)
     if 'lock' in filedescriptortable[fd]:
       filedescriptortable[fd]['lock'].release()
     del filedescriptortable[fd]
 
 
 ##### DUP2  #####
-
-
 # private helper that allows this to be used by dup
 def _dup2_helper(oldfd,newfd):
 
@@ -1367,14 +1388,12 @@ def _dup2_helper(oldfd,newfd):
     raise SyscallError("dup2_syscall","EBADF","Invalid new file descriptor.")
 
   # if they are equal, return them
-  if newfd == oldfd:
-    return newfd
+  if newfd == oldfd: return newfd
 
   # okay, they are different.   If the new fd exists, close it.
   if newfd in filedescriptortable:
     # should not result in an error.   This only occurs on a bad fd 
     _close_helper(newfd)
-
 
   # Okay, we need the new and old to point to the same thing.
   # NOTE: I am not making a copy here!!!   They intentionally both
@@ -1388,7 +1407,6 @@ def dup2_syscall(oldfd,newfd):
   """ 
     http://linux.die.net/man/2/dup2
   """
-
   # check the fd
   if oldfd not in filedescriptortable:
     raise SyscallError("dup2_syscall","EBADF","Invalid old file descriptor.")
@@ -1400,13 +1418,11 @@ def dup2_syscall(oldfd,newfd):
   try:
     return _dup2_helper(oldfd, newfd)
 
-  finally:
-    # ... release the lock
-    filedescriptortable[oldfd]['lock'].release()
+  # ... release the lock
+  finally: filedescriptortable[oldfd]['lock'].release()
 
 
 ##### DUP  #####
-
 def dup_syscall(fd):
   """ 
     http://linux.die.net/man/2/dup
@@ -1421,8 +1437,7 @@ def dup_syscall(fd):
 
   try: 
     # get the next available file descriptor
-    try:
-      nextfd = get_next_fd()
+    try: nextfd = get_next_fd()
     except SyscallError, e:
       # If it's an error getting the fd, return our call name instead.
       assert(e[0]=='open_syscall')
@@ -1432,14 +1447,12 @@ def dup_syscall(fd):
     # this does the work.   It should _never_ raise an exception given the
     # checks we've made...
     return _dup2_helper(fd, nextfd)
-  
-  finally:
-    # ... release the lock
-    filedescriptortable[fd]['lock'].release()
+
+  # ... release the lock  
+  finally: filedescriptortable[fd]['lock'].release()
 
 
 ##### FCNTL  #####
-
 def fcntl_syscall(fd, cmd, *args):
   """ 
     http://linux.die.net/man/2/fcntl
@@ -1592,18 +1605,17 @@ def chmod_syscall(path, mode):
     if truepath not in path2inode:
       raise SyscallError("chmod_syscall", "ENOENT", "The path does not exist.")
 
-    thisinode = path2inode[truepath]
-    thisBlock = findBlock(thisinode)
+    inode = path2inode[truepath]
+    block = findBlock(inode)
     # be sure there aren't extra mode bits... No errno seems to exist for this
     assert(mode & (S_IRWXA|S_FILETYPEFLAGS) == mode)
 
     # should overwrite any previous permissions, according to POSIX.   However,
     # we want to keep the 'type' part of the mode from before
     block['mode'] = (block['mode'] & ~S_IRWXA) | mode
+    persist(block,inode)
 
-  finally:
-    persist(superblock,SUPERBLOCKFNAME)
-    theLock.release()
+  finally: theLock.release()
   return 0
 
 #### TRUNCATE  ####
@@ -1620,7 +1632,7 @@ def truncate_syscall(path, length):
 
 
 #### FTRUNCATE ####
-def ftruncate_syscall(fd, newsize):
+def ftruncate_syscall(fd, newsize, calledFromWrite=False):
   """
     http://linux.die.net/man/2/ftruncate
   """
@@ -1631,9 +1643,11 @@ def ftruncate_syscall(fd, newsize):
   if newsize < 0:
     raise SyscallError("ftruncate_syscall","EINVAL","Incorrect length passed.")
 
-  # Acquire the fd lock...
-  desc = filedescriptortable[fd]
-  desc['lock'].acquire(True)
+  # Acquire the fd lock (if called from anywhere but write_syscall, since that function locks already)
+  if not calledFromWrite:
+    desc = filedescriptortable[fd]
+    desc['lock'].acquire(True)
+    pass
 
   try: 
     # we will need the file size in a moment, but also need to check the type
@@ -1695,7 +1709,7 @@ def ftruncate_syscall(fd, newsize):
         pass
       pass
 
-    else: #newsize < filesize and direct
+    else: #newsize < filesize, and direct
       dataBlockNum = block['location']
       to_save = fileobjecttable[dataBlockNum].readat(newsize,0)
       fileobjecttable[dataBlockNum].close()
@@ -1707,8 +1721,16 @@ def ftruncate_syscall(fd, newsize):
       pass
       
     block['size'] = new_len
-        
-  finally: desc['lock'].release() 
+
+    #persist changes (no need to do this if called from write)
+    if not calledFromWrite: persistFile(block, inode)
+
+  finally:
+    if not calledFromWrite:
+      desc = filedescriptortable[fd]
+      desc['lock'].release() 
+      pass
+    pass
 
   return 0
 
