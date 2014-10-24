@@ -159,7 +159,7 @@ def _blank_fs_init():
   superblock['freeStart'] = STARTFREE
   superblock['freeEnd'] = ENDFREE
   superblock['maxBlocks'] = MAXBLOCKS
-  persist(superblock,SUPERBLOCKFNAME)
+  persist(superblock,0)
 
   #root block
   rootblock['size'] = 0
@@ -171,7 +171,7 @@ def _blank_fs_init():
   rootblock['mtime'] = DEFAULT_TIME
   rootblock['linkcount'] = 2 # the number of dir entries...
   rootblock['filename_to_inode_dict'] = {'d.':ROOTINODE,'d..':ROOTINODE}
-  persist(rootblock,ROOTBLOCKFNAME)
+  persist(rootblock,ROOTINODE)
   path2inode['/'] = ROOTINODE
 
   #freeblocklist
@@ -190,14 +190,18 @@ def _blank_fs_init():
     freeblocklist.append(x)
 
     #persist this block
-    persist(x,PREFIX+str(i+1))
+    persist(x,i+1)
     pass    
   pass
 
-# These are used to initialize and stop the system
-def persist(block, fname):
+def persist(block, blockNum):
+  '''
+  Very important function!
+  Upon any change in metadata (superblock, freeblocklist, rootblock, inodes, indexes),
+  call this function to preserve a specific block.
+  '''
+  fname = PREFIX+str(blockNum)
   datastring = serializedata(block)
-  # open the file (clobber) and write out the information...
   try: removefile(fname)
   except FileNotFoundError: pass
   datafo = openfile(fname,True)
@@ -222,8 +226,9 @@ def findBlockDetailed(blockNum):
 
     #Plain old block
     else:
-      #add to blocks if it isn't as big as we need
       targetArray, offset = blocks, ROOTINODE
+      #add to blocks if it isn't as big as we need
+      #only happens when restore() is called, so no need to persist
       while len(blocks) <= (blockNum-offset): blocks.append({})
       pass
 
@@ -296,10 +301,12 @@ def _rebuild_path2inode():
 #Find the (number of) next free block
 def findNextFree():
   for i in range(ENDFREE-STARTFREE+1):
-    if len(freeblocklist[i][FREELIST]) > 0:
-      #pick smallest element from the free list
+    if len(freeblocklist[i]) > 0:
+      #take smallest element from the list (guaranteed to be first)
       blockNum = freeblocklist[i][0]
       del freeblocklist[i][0:1]
+      #save change to f.b.l
+      persist(freeblocklist[i], i+STARTFREE)
       #return the number
       return blockNum
     pass
@@ -310,6 +317,7 @@ def allocate():
   #Create the dictionary for the block if necessary
   blockNum = findNextFree()
   while blockNum-ROOTINODE >= len(blocks): blocks.append({})
+  #call persist in whatever calls this function (because it will do actual work)
   return blockNum
 
 def freeBlock(blockNum):
@@ -321,15 +329,15 @@ def freeBlock(blockNum):
   loc = 0
   while x[loc] < blockNum: loc += 1
   x.insert(loc,blockNum)
+  #we changed this metadata block, so save changes
+  persist(x,loc+STARTFREE)
   pass
 
 # private helper function that converts a relative path or a path with things
 # like foo/../bar to a normal path.
 def _get_absolute_path(path):
   
-  # should raise an ENOENT error...
   if path == '': raise SyscallError('','ENOENT','There is no such thing as a nameless entry, dummy')
-    #return path
 
   # If it's a relative path, prepend the CWD...
   if path[0] != '/': path = currentDir['value'] + '/' + path
@@ -436,11 +444,9 @@ def fstatfs_syscall(fd):
   """ 
     http://linux.die.net/man/2/fstatfs
   """
-
   # is the file descriptor valid?
   if fd not in filedescriptortable:
     raise SyscallError("fstatfs_syscall","EBADF","The file descriptor is invalid.")
-  
   # if so, return the information...
   return _istatfs_helper(filedescriptortable[fd]['inode'])
 
@@ -463,11 +469,10 @@ def statfs_syscall(path):
       raise SyscallError("statfs_syscall","ENOENT","The path does not exist.")
 
     thisinode = path2inode[truepath]
-      
+    
     return _istatfs_helper(thisinode)
 
-  finally:
-    theLock.release()
+  finally: theLock.release()
 
 ##### ACCESS  #####
 
@@ -498,7 +503,9 @@ def access_syscall(path, amode):
     raise SyscallError("access_syscall","EACESS","The requested access is denied.")
 
   finally:
-    persist(superblock,SUPERBLOCKFNAME)
+    #TODO: what must I persist? Isn't this just a check function?
+    persist(superblock,0)
+
     # release the lock
     theLock.release()
     pass
@@ -541,8 +548,7 @@ def mkdir_syscall(path, mode):
     if truepath in path2inode:
       raise SyscallError("mkdir_syscall","EEXIST","The path exists.")
       
-    # okay, it doesn't exist (great!).   Does it's parent exist and is it a 
-    # dir?
+    # okay, it doesn't exist (great!). Does its parent exist and is it a dir?
     trueparentpath = _get_absolute_parent_path(path)
 
     if trueparentpath not in path2inode:
@@ -567,17 +573,19 @@ def mkdir_syscall(path, mode):
             'atime':DEFAULT_TIME, 'ctime':DEFAULT_TIME, 'mtime':DEFAULT_TIME,
             'linkcount':2,    # the number of dir entries...
             'filename_to_inode_dict': {'d.':newinode, 'd..':parentinode}}
-    blocks[newinode] = newinodeentry
+    blocks[newinode-ROOTINODE] = newinodeentry
     parentBlock['filename_to_inode_dict'][dirname] = newinode
     parentBlock['linkcount'] += 1
+
+    #persist metadata changes
+    persist(parentBlock, parentinode)
+    persist(blocks[newinode-ROOTINODE],newinode)
 
     # finally, update the path2inode and return success!!!
     path2inode[truepath] = newinode    
     return 0
 
-  finally:
-    persist(superblock,SUPERBLOCKFNAME)
-    theLock.release()
+  finally: theLock.release()
 
 ##### RMDIR  #####
 
@@ -602,7 +610,7 @@ def rmdir_syscall(path):
       raise SyscallError("rmdir_syscall","EEXIST","The path does not exist.")
 
     thisinode = path2inode[truepath]
-      
+    
     # okay, is it a directory?
     if not IS_DIR(findBlock(thisinode)['mode']):
       raise SyscallError("rmdir_syscall","ENOTDIR","Path is not a directory.")
@@ -628,14 +636,15 @@ def rmdir_syscall(path):
     #mark as free
     freeBlock(thisinode)
 
+    persist(parentBlock, parentinode)
+    #Don't persist thisinode, since the content hasn't changed
+
     # finally, clean up the path2inode and return success!!!
     del path2inode[truepath]
 
     return 0
 
-  finally:
-    persist(superblock,SUPERBLOCKFNAME)
-    theLock.release()
+  finally: theLock.release()
 
 
 ##### LINK  #####
@@ -697,13 +706,14 @@ def link_syscall(oldpath, newpath):
     # ... and the file itself
     oldBlock['linkcount'] += 1
 
+    persist(oldBlock, oldinode)
+    persist(newParentBlock, newparentinode)
+
     # finally, update the path2inode and return success!!!
     path2inode[truenewpath] = oldinode    
     return 0
 
-  finally:
-    persist(superblock,SUPERBLOCKFNAME)
-    theLock.release()
+  finally: theLock.release()
 
 ##### UNLINK  #####
 def unlink_syscall(path):
@@ -721,9 +731,9 @@ def unlink_syscall(path):
     # is the path there?
     if truepath not in path2inode:
       raise SyscallError("unlink_syscall","ENOENT","The path does not exist.")
-
-    thisinode = path2inode[truepath]
       
+    thisinode = path2inode[truepath]
+    
     # okay, is it a directory?
     if IS_DIR(findBlock(thisinode)['mode']):
       raise SyscallError("unlink_syscall","EISDIR","Path is a directory.")
@@ -759,6 +769,10 @@ def unlink_syscall(path):
       # TODO: I also would remove the file.   However, I need to do special
       # things if it's open, like wait until it is closed to remove it.
       pass
+
+    persist(parentBlock, parentinode)
+    persist(thisBlock, thisinode)
+
     return 0
 
   finally:
@@ -790,9 +804,7 @@ def stat_syscall(path):
    
     return _istat_helper(thisinode)
 
-  finally:
-    persist(superblock,SUPERBLOCKFNAME)
-    theLock.release()
+  finally: theLock.release()
 
 
 ##### FSTAT  #####
@@ -837,8 +849,6 @@ def fstat_syscall(fd):
     return _istat_helper_chr_file(inode)
   return _istat_helper(inode)
 
-
-
 # private helper routine that returns stat data given an inode
 def _istat_helper(inode):
   block = findBlock(inode)
@@ -862,9 +872,7 @@ def _istat_helper(inode):
         )
   return ret
 
-
 ##### OPEN  #####
-
 # get the next free file descriptor
 def get_next_fd():
   # let's get the next available fd number.   The standard says we need to 
@@ -876,9 +884,7 @@ def get_next_fd():
 
 def makeFileObject(inode):
   # if it exists, close the existing file object so I can remove it...
-  if inode in fileobjecttable:
-    fileobjecttable[inode].close()
-    pass
+  if inode in fileobjecttable: fileobjecttable[inode].close()
   # remove the file...
   removefile(PREFIX+str(inode))
   # always open the file.
@@ -1018,14 +1024,9 @@ def open_syscall(path, flags, mode):
     # Done!   Let's return the file descriptor.
     return thisfd
 
-  finally:
-    persist(superblock,SUPERBLOCKFNAME)
-    theLock.release()
-
-
+  finally: theLock.release()
 
 ##### CREAT  #####
-
 def creat_syscall(pathname, mode):
   """ 
     http://linux.die.net/man/2/creat
