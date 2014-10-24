@@ -97,16 +97,18 @@ def load_fs(name=SUPERBLOCKFNAME):
     load_fs_special_files()
   else:
     f.close()
-    try:
-      #load the blocks!
-      for fname in listdir():
-        if fname.startswith(PREFIX): restore(fname)
-        pass
-      superblock["mount"] += 1
+
+    #load the blocks!
+    for i in range(MAXBLOCKS):
+      try: restore(PREFIX+str(i))
+      except:
+        warning(i)
+        break
       pass
-    except (IndexError, KeyError), e:
-      warning("Error: Cannot reload filesystem.  Run lind_fsck for details.")
-      exitall(1)
+    superblock["mount"] += 1
+
+    pass
+
   _load_lower_handle_stubs()
 
 
@@ -152,9 +154,9 @@ def _blank_fs_init():
   # Now setup blank data structures
 
   #superblock
-  superblock['creationTime'] = CREATIONTIME
+  superblock['creationTime'] = DEFAULT_TIME
   superblock['mount'] = 0
-  superblock['devId'] = DEVID
+  superblock['dev_id'] = DEVID
   superblock['root'] = ROOTINODE
   superblock['freeStart'] = STARTFREE
   superblock['freeEnd'] = ENDFREE
@@ -221,7 +223,7 @@ def findBlockDetailed(blockNum):
   else:
     #Free block list
     if blockNum >= STARTFREE and blockNum <= ENDFREE:
-      targetArray, offset = freeblocks, 1
+      targetArray, offset = freeblocklist, 1
       pass
 
     #Plain old block
@@ -242,12 +244,6 @@ def findBlockDetailed(blockNum):
 def findBlock(blockNum): return findBlockDetailed(blockNum)[0]
 
 def restore(fname):
-  dotIndex = fname.index('.')
-  inode = int(fname[dotIndex+1:]) #block number
-  block, targetArray, index = findBlockDetailed(inode)
-
-  # should only be called with a fresh system...
-  assert(block == {})
 
   # open the file and write out the information...
   datafo = openfile(fname,True)
@@ -259,6 +255,13 @@ def restore(fname):
   #If we cannot deserialize, it means the block is "pure data" (a file)
   #which will be modified via syscalls (read/write/trunc, etc.)
   except: return
+
+  dotIndex = fname.index('.')
+  inode = int(fname[dotIndex+1:]) #block number
+  block, targetArray, index = findBlockDetailed(inode)
+
+  # should only be called with a fresh system...
+  assert(block == {})
 
   if fname in (ROOTBLOCKFNAME, SUPERBLOCKFNAME):
     # I need to put things in the dict, but it's not a global...   so instead
@@ -555,7 +558,7 @@ def mkdir_syscall(path, mode):
       raise SyscallError("mkdir_syscall","ENOENT","Parent path does not exist.")
 
     parentinode = path2inode[trueparentpath]
-    parentBlock = findBlock(pareninode)
+    parentBlock = findBlock(parentinode)
 
     if not IS_DIR(parentBlock['mode']):
       raise SyscallError("mkdir_syscall","ENOTDIR","Path's parent is not a directory.")
@@ -1000,6 +1003,7 @@ def open_syscall(path, flags, mode):
   
     # Note, directories can be opened (to do getdents, etc). We shouldn't
     # actually open something in this case...
+
     # Is it a regular file?
     if IS_REG(block['mode']):
       # this is a regular file. 
