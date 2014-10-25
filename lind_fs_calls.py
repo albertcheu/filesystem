@@ -907,7 +907,7 @@ def open_syscall(path, flags, mode):
       raise SyscallError("open_syscall","ENOENT","The file does not exist.")
 
     truepath = _get_absolute_path(path)
-    warning("This is what we are trying to open:",truepath)
+    #warning("This is what we are trying to open:",truepath)
     made = False
 
     # is the file missing?
@@ -939,6 +939,7 @@ def open_syscall(path, flags, mode):
       assert(mode & (S_IRWXA|S_FILETYPEFLAGS) == mode)
       effective_mode = (S_IFCHR | mode) if (S_IFCHR & flags) != 0 else (S_IFREG | mode)
 
+      if IS_DIR(mode): raise SyscallError("open_syscall","EINVAL","Can't open dir that doesnt exist")
       newinodeentry = {'size':0, 'uid':DEFAULT_UID, 'gid':DEFAULT_GID, 
                        'mode':effective_mode,
                        #initially assume we can fit data into one block, growing when necessary
@@ -951,7 +952,7 @@ def open_syscall(path, flags, mode):
       
       # let's make the parent point to it...
       parentBlock = findBlock(parentinode)
-      parentBlock['filename_to_inode_dict'][filename] = newinode
+      parentBlock['filename_to_inode_dict']['f'+filename] = newinode
       # ... and increment the link count on the dir...
       parentBlock['linkcount'] += 1
 
@@ -976,7 +977,7 @@ def open_syscall(path, flags, mode):
 
       #If we are truncating the file, we are erasing before opening
       # If O_RDONLY is set, the behavior is undefined, so this is okay
-      if O_TRUNC & flags:
+      if not IS_DIR(mode) and (O_TRUNC & flags):
         inode = path2inode[truepath]
         block = findBlock(inode)
         
@@ -1181,15 +1182,16 @@ def read_syscall(fd, count):
 
 ##### WRITE  #####
 def persistFile(block, blockNum):
+  #persist inode and/or index block
 
   #persist index block if it exists
-  if block['indirect']:
+  if 'indirect' in block and block['indirect']:
     indexLoc = block['location']
     persist(blocks[indexLoc-ROOTINODE],indexLoc)
     pass
 
-  #persist file's inode
-  persist(block,inode)
+  #persist inode
+  persist(block,blockNum)
   pass
 
 
@@ -1336,8 +1338,11 @@ def _close_helper(fd):
     # Is there more than one descriptor open?   If so, return success
     return 0
 
+  #no file objects to close
+  if IS_DIR(block['mode']): persist(block, inode)
+
   # now let's close it and remove it from the table
-  if block['indirect']:
+  elif block['indirect']:
     indexLoc = block['location']
     index = blocks[indexLoc-ROOTINODE]
     for blockNum in index:
@@ -1584,7 +1589,7 @@ def getdents_syscall(fd, quantity):
       if bufferedquantity > quantity:
         break
 
-      returninodefntuplelist.append((entryinode, entryname, entrytype, currentquantity))
+      returninodefntuplelist.append((entryinode, entryname[1:], entrytype, currentquantity))
 
     # and move the position along.   Go no further than the end...
     filedescriptortable[fd]['position'] = min(startposition + len(returninodefntuplelist),\
@@ -1650,11 +1655,10 @@ def ftruncate_syscall(fd, newsize, calledFromWrite=False):
   if newsize < 0:
     raise SyscallError("ftruncate_syscall","EINVAL","Incorrect length passed.")
 
+  desc = filedescriptortable[fd]
+  
   # Acquire the fd lock (if called from anywhere but write_syscall, since that function locks already)
-  if not calledFromWrite:
-    desc = filedescriptortable[fd]
-    desc['lock'].acquire(True)
-    pass
+  if not calledFromWrite: desc['lock'].acquire(True)
 
   try: 
     # we will need the file size in a moment, but also need to check the type
@@ -1718,8 +1722,11 @@ def ftruncate_syscall(fd, newsize, calledFromWrite=False):
 
     else: #newsize < filesize, and direct
       dataBlockNum = block['location']
-      to_save = fileobjecttable[dataBlockNum].readat(newsize,0)
-      fileobjecttable[dataBlockNum].close()
+      try:
+        to_save = fileobjecttable[dataBlockNum].readat(newsize,0)
+        fileobjecttable[dataBlockNum].close()
+      except: to_save = ""
+
       # remove the old file
       removefile(PREFIX+str(inode))
       # make a new blank one
@@ -1727,7 +1734,7 @@ def ftruncate_syscall(fd, newsize, calledFromWrite=False):
       fileobjecttable[dataBlockNum].writeat(to_save, 0)
       pass
       
-    block['size'] = new_len
+    block['size'] = newsize
 
     #persist changes (no need to do this if called from write)
     if not calledFromWrite: persistFile(block, inode)
@@ -1843,6 +1850,7 @@ def _write_chr_file(inode, data):
 
 
 def _istat_helper_chr_file(inode):
+  block = findBlock(inode)
   ret =  (5,          # st_dev, its always 5 for chr_file's.
           inode,                                 # inode
           block['mode'],
