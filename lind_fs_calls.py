@@ -100,13 +100,12 @@ def load_fs(name=SUPERBLOCKFNAME):
 
     #load the blocks!
     for i in range(MAXBLOCKS):
-      try: restore(PREFIX+str(i))
-      except:
-        warning(i)
-        break
+      if not restore(i): break
       pass
     superblock["mount"] += 1
 
+    # I need to rebuild the path2inode table. let's do this!
+    _rebuild_path2inode()
     pass
 
   _load_lower_handle_stubs()
@@ -182,7 +181,7 @@ def _blank_fs_init():
 
   for i in range(ENDFREE - STARTFREE + 1):
     x = []
-    for j in range(currentBlock,nextToHit):
+    for j in range(currentBlock,nextToHit,1):
       x.append(j)
       currentBlock += 1
       pass
@@ -222,19 +221,17 @@ def findBlockDetailed(blockNum):
 
   else:
     #Free block list
-    if blockNum >= STARTFREE and blockNum <= ENDFREE:
+    if blockNum >= STARTFREE and blockNum <= ENDFREE:      
       targetArray, offset = freeblocklist, 1
       pass
 
     #Plain old block
-    else:
-      targetArray, offset = blocks, ROOTINODE
-      #add to blocks if it isn't as big as we need
-      #only happens when restore() is called, so no need to persist
-      while len(blocks) <= (blockNum-offset): blocks.append({})
-      pass
+    else: targetArray, offset = blocks, ROOTINODE
 
+    #add to array if it isn't as big as we need
+    #only happens when restore() is called, so no need to persist    
     index = blockNum - offset
+    while len(targetArray) <= index: targetArray.append({})
     block = targetArray[index]
     pass
 
@@ -243,10 +240,13 @@ def findBlockDetailed(blockNum):
 #Just gimme the dictionary
 def findBlock(blockNum): return findBlockDetailed(blockNum)[0]
 
-def restore(fname):
+def restore(blockNum):
 
   # open the file and write out the information...
-  datafo = openfile(fname,True)
+
+  try: datafo = openfile(PREFIX+str(blockNum),False)
+  except FileNotFoundError, e: return False
+
   datastring = datafo.readat(None, 0)
   datafo.close()
 
@@ -254,25 +254,21 @@ def restore(fname):
   try: data = deserializedata(datastring)
   #If we cannot deserialize, it means the block is "pure data" (a file)
   #which will be modified via syscalls (read/write/trunc, etc.)
-  except: return
+  except: return True
 
-  dotIndex = fname.index('.')
-  inode = int(fname[dotIndex+1:]) #block number
-  block, targetArray, index = findBlockDetailed(inode)
+  block, targetArray, index = findBlockDetailed(blockNum)
 
   # should only be called with a fresh system...
   assert(block == {})
 
-  if fname in (ROOTBLOCKFNAME, SUPERBLOCKFNAME):
+  if blockNum in (0, ROOTINODE):
     # I need to put things in the dict, but it's not a global...   so instead
     # add them one at a time.   It should be empty to start with
     for item in data: block[item] = data[item]
     pass
   else: targetArray[index] = data
 
-  # I need to rebuild the path2inode table. let's do this!
-  _rebuild_path2inode()
-  pass
+  return True
 
 #path is already added.
 def _rebuild_path2inode_helper(path, inode):
@@ -307,6 +303,7 @@ def findNextFree():
     if len(freeblocklist[i]) > 0:
       #take smallest element from the list (guaranteed to be first)
       blockNum = freeblocklist[i][0]
+      #warning("Next free block is "+str(blockNum))
       del freeblocklist[i][0:1]
       #save change to f.b.l
       persist(freeblocklist[i], i+STARTFREE)
@@ -581,6 +578,7 @@ def mkdir_syscall(path, mode):
     parentBlock['linkcount'] += 1
 
     #persist metadata changes
+    #warning("made "+str(path),"persisting:"+str((parentinode,newinode)))
     persist(parentBlock, parentinode)
     persist(blocks[newinode-ROOTINODE],newinode)
 
@@ -909,6 +907,7 @@ def open_syscall(path, flags, mode):
       raise SyscallError("open_syscall","ENOENT","The file does not exist.")
 
     truepath = _get_absolute_path(path)
+    warning("This is what we are trying to open:",truepath)
     made = False
 
     # is the file missing?
@@ -964,6 +963,10 @@ def open_syscall(path, flags, mode):
       
       #We made a new file
       made = True
+
+      persist(parentBlock,parentinode)
+      persist(newinodeentry, newinode)
+      persist("",secondaryNode)
 
     # if the file did exist...
     else:
@@ -1753,7 +1756,7 @@ def mknod_syscall(path, mode, dev):
     http://linux.die.net/man/2/mknod
   """
   if path == '':
-    raise SyscallError("mknod_syscall","ENOENT","The file does not exist.")
+    raise SyscallError("mknod_syscall","ENOENT","File must have a name")
 
   truepath = _get_absolute_path(path)
 
@@ -1781,7 +1784,10 @@ def mknod_syscall(path, mode, dev):
   # add the major and minor device no.'s, I did it here so that the code can be managed
   # properly, instead of putting everything in open_syscall.
   inode = filedescriptortable[fd]['inode']
-  findBlock(inode)['rdev'] = dev
+  block = findBlock(inode)
+  block['rdev'] = dev
+  #warning("persisting "+str(inode))
+  persist(block,inode)
  
   # close the file descriptor... 
   close_syscall(fd)
