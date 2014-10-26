@@ -883,14 +883,14 @@ def get_next_fd():
       return fd
   raise SyscallError("open_syscall","EMFILE","The maximum number of files are open.")
 
-def makeFileObject(inode):
+def makeFileObject(blockNum):
   # if it exists, close the existing file object so I can remove it...
-  if inode in fileobjecttable: fileobjecttable[inode].close()
+  if blockNum in fileobjecttable: fileobjecttable[blockNum].close()
   # remove the file...
-  removefile(PREFIX+str(inode))
+  removefile(PREFIX+str(blockNum))
   # always open the file.
-  fileobjecttable[inode] = openfile(PREFIX+str(inode),True)
-  fileobjecttable[inode].writeat('\0'*BLOCKSIZE,0)
+  fileobjecttable[blockNum] = openfile(PREFIX+str(blockNum),True)
+  fileobjecttable[blockNum].writeat('\0'*BLOCKSIZE,0)
   pass
 
 def open_syscall(path, flags, mode):
@@ -999,7 +999,7 @@ def open_syscall(path, flags, mode):
             for loc in secondaryBlock['location']:
               fileobjecttable[loc] = openfile(PREFIX+str(loc),True)
             pass
-          else: fileobjecttable[secondaryInode] = openfile(PREFIX+str(inode),True)
+          else: fileobjecttable[secondaryInode] = openfile(PREFIX+str(secondaryInode),True)
           pass
         pass
 
@@ -1124,9 +1124,6 @@ def read_syscall(fd, count):
     http://linux.die.net/man/2/read
   """
 
-  # BUG: I probably need a filedescriptortable lock to prevent an untimely
-  # close call or similar from messing everything up...
-
   # check the fd
   if fd not in filedescriptortable:
     raise SyscallError("read_syscall","EBADF","Invalid file descriptor.")
@@ -1155,7 +1152,13 @@ def read_syscall(fd, count):
     position = filedescriptortable[fd]['position']
 
     #If the block is direct, just do a simple read of the bytes
-    if not block['indirect']: data = fileobjecttable[block['location']].readat(count,position)
+    if not block['indirect']:
+
+      dataBlockNum = block['location']
+
+      data = fileobjecttable[dataBlockNum].readat(count, position)
+
+      pass
 
     #If indirect...
     else:
@@ -1189,7 +1192,7 @@ def read_syscall(fd, count):
 
 
 ##### WRITE  #####
-def persistFile(block, blockNum):
+def persistFileMetadata(block, blockNum):
   #persist inode and/or index block
 
   #persist index block if it exists
@@ -1241,28 +1244,34 @@ def write_syscall(fd, data):
     # let's get the position...
     position = filedescriptortable[fd]['position']
     if position < 0: raise SyscallError("write_syscall","foobar...","Please lseek to a positive number")
-    
-    #resize to fit our aims
-    #ftruncate_syscall(fd, position+len(data),True)
 
     #actually write the data
     if block['indirect']:
       #find which block to start from and the position within that block
-      startIndex,modPosition = position / BLOCKSIZE, position % BLOCKSIZE
+      start,modPosition = position / BLOCKSIZE, position % BLOCKSIZE
       index = findBlock(block['location'])
       lhs = 0
-      for blockNumber in index[startIndex:]:
+
+      for blockNumber in index[start:]:
         #bytes left in this block
         bytesLeft = BLOCKSIZE - modPosition
         #write what needs to be written in this block -> which slice of data
         fileobjecttable[blockNumber].writeat(data[lhs:lhs+bytesLeft],modPosition)
-        #shift the slice
-        lhs += bytesLeft
         #subsequent blocks of data are written starting from the top
         modPosition = 0
+        #shift the slice
+        lhs += bytesLeft
+        #stop when we've reached the end of the data
+        if lhs == len(data): break
         pass
       pass
-    else: fileobjecttable[block['location']].writeat(data, position)
+
+    else:
+      warning('inode is at '+str(inode))
+      dataBlockNum = block['location']
+      warning("writing to "+str(dataBlockNum))
+      warning(str(data))
+      fileobjecttable[dataBlockNum].writeat(data, position)
 
     # and update the position
     filedescriptortable[fd]['position'] += len(data)
@@ -1270,7 +1279,8 @@ def write_syscall(fd, data):
     # update the file size if we've extended it
     block['size'] = max(block['size'],filedescriptortable[fd]['position'])
 
-    persistFile(block,inode)
+    #persist the metadata
+    persistFileMetadata(block,inode)
       
     # we always write it all, so just return the length of what we were passed.
     # We do not mention whether we write blank data (if position is after the 
@@ -1662,7 +1672,7 @@ def truncate_syscall(path, length):
 
 
 #### FTRUNCATE ####
-def ftruncate_syscall(fd, newsize, calledFromWrite=False):
+def ftruncate_syscall(fd, newsize):
   """
     http://linux.die.net/man/2/ftruncate
   """
@@ -1675,8 +1685,8 @@ def ftruncate_syscall(fd, newsize, calledFromWrite=False):
 
   desc = filedescriptortable[fd]
   
-  # Acquire the fd lock (if called from anywhere but write_syscall, since that function locks already)
-  if not calledFromWrite: desc['lock'].acquire(True)
+  # Acquire the fd lock
+  desc['lock'].acquire(True)
 
   try: 
     # we will need the file size in a moment, but also need to check the type
@@ -1754,15 +1764,12 @@ def ftruncate_syscall(fd, newsize, calledFromWrite=False):
       
     block['size'] = newsize
 
-    #persist changes (no need to do this if called from write)
-    if not calledFromWrite: persistFile(block, inode)
+    #persist changes
+    persistFileMetadata(block, inode)
 
   finally:
-    warning("We completed ftruncate!")
-    if not calledFromWrite:
-      desc = filedescriptortable[fd]
-      desc['lock'].release() 
-      pass
+    desc = filedescriptortable[fd]
+    desc['lock'].release()     
     pass
 
   return 0
