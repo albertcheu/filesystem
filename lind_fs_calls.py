@@ -974,25 +974,34 @@ def open_syscall(path, flags, mode):
       # did they use O_CREAT and O_EXCL? If so, throw error
       if O_CREAT & flags and O_EXCL & flags:
         raise SyscallError("open_syscall","EEXIST","The file exists.")
+      inode = path2inode[truepath]
+      block = findBlock(inode)
+      if not IS_DIR(block['mode']):
 
-      #If we are truncating the file, we are erasing before opening
-      # If O_RDONLY is set, the behavior is undefined, so this is okay
-      if not IS_DIR(mode) and (O_TRUNC & flags):
-        inode = path2inode[truepath]
-        block = findBlock(inode)
         
         secondaryInode = block['location']#the block number of index block OR data
         secondaryBlock = findBlock(secondaryInode)#the actual index block OR data
 
-        #Make file objects for all linddata.X that contain data
-        #makeFileObject will destroy existing blocks and create blank replacements
-        if block['indirect']:
-          for loc in secondaryBlock['location']: makeFileObject(loc)
+        # If O_RDONLY is set, the behavior is undefined, so this is okay
+        #If we are truncating the file, we are erasing before opening
+        if (O_TRUNC & flags):
+          #Make file objects for all linddata.X that contain data
+          #makeFileObject will destroy existing blocks and create blank replacements
+          if block['indirect']:
+            for loc in secondaryBlock['location']: makeFileObject(loc)
+            pass
+          else: makeFileObject(secondaryInode)
+          # reset the size to 0
+          block['size'] = 0
+          persist(block, inode)
           pass
-        else: makeFileObject(secondaryInode)
-
-        # reset the size to 0
-        block['size'] = 0
+        else:
+          if block['indirect']:
+            for loc in secondaryBlock['location']:
+              fileobjecttable[loc] = openfile(PREFIX+str(loc),True)
+            pass
+          else: fileobjecttable[inode] = openfile(PREFIX+str(inode),True)
+          pass
         pass
 
     # TODO: I should check permissions...
@@ -1542,8 +1551,6 @@ def getdents_syscall(fd, quantity):
 
   # BUG: I probably need a filedescriptortable lock to prevent race conditions
 
-  # BUG BUG BUG: Do I really understand this spec!?!?!?!
-
   # check the fd
   if fd not in filedescriptortable:
     raise SyscallError("getdents_syscall","EBADF","Invalid file descriptor.")
@@ -1600,6 +1607,8 @@ def getdents_syscall(fd, quantity):
   finally:
     # ... release the lock
     filedescriptortable[fd]['lock'].release()
+    #the following line should make sense b/c getdents is only called in context of readdir, which opens just before
+    del filedescriptortable[fd]
 
 #### CHMOD ####
 def chmod_syscall(path, mode):
