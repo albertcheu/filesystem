@@ -1017,17 +1017,14 @@ def open_syscall(path, flags, mode):
     # actually open something in this case...
 
     # Is it a regular file?
-    if IS_REG(block['mode']):
-      # this is a regular file. 
-      #If the file never existed before this function call, store in f.o.t
-      if made:
-
-        dataBlockNum = block['location'] #we assumed the file fits in 1 block
-        warning("Made block no. "+str(dataBlockNum)+"; will make corresponding file")
-
-        thisfo = openfile(PREFIX+str(dataBlockNum),False)
-        fileobjecttable[dataBlockNum] = thisfo
-        pass
+    #If the file never existed before this function call, store in f.o.t
+    if IS_REG(block['mode']) and made:
+      dataBlockNum = block['location'] #we assumed the file fits in 1 block
+      #warning("Made block no. "+str(dataBlockNum)+"; will make corresponding file")
+      
+      thisfo = openfile(PREFIX+str(dataBlockNum),False)
+      fileobjecttable[dataBlockNum] = thisfo
+      
       pass
 
     # I'm going to assume that if you use O_APPEND I only need to 
@@ -1246,7 +1243,7 @@ def write_syscall(fd, data):
     if position < 0: raise SyscallError("write_syscall","foobar...","Please lseek to a positive number")
     
     #resize to fit our aims
-    ftruncate_syscall(fd, position+len(data))
+    #ftruncate_syscall(fd, position+len(data),True)
 
     #actually write the data
     if block['indirect']:
@@ -1271,8 +1268,7 @@ def write_syscall(fd, data):
     filedescriptortable[fd]['position'] += len(data)
 
     # update the file size if we've extended it
-    if filedescriptortable[fd]['position'] > filesize:
-      block['size'] = filedescriptortable[fd]['position']
+    block['size'] = max(block['size'],filedescriptortable[fd]['position'])
 
     persistFile(block,inode)
       
@@ -1742,7 +1738,7 @@ def ftruncate_syscall(fd, newsize, calledFromWrite=False):
         pass
       pass
 
-    else: #newsize < filesize, and direct
+    else: #newsize <= filesize, and direct
       dataBlockNum = block['location']
       try:
         to_save = fileobjecttable[dataBlockNum].readat(newsize,0)
@@ -1762,6 +1758,7 @@ def ftruncate_syscall(fd, newsize, calledFromWrite=False):
     if not calledFromWrite: persistFile(block, inode)
 
   finally:
+    warning("We completed ftruncate!")
     if not calledFromWrite:
       desc = filedescriptortable[fd]
       desc['lock'].release() 
