@@ -6,6 +6,9 @@
   Start Date: December 17th, 2011
 
   Modified by Albert Cheu, for homework
+
+  DO NOT COPY THE CODE!!! That's called plagiarism, kids.
+  But I suppose the comments are up for grabs; the code itself is my property
   10/11/14 - ?
 """
 BLOCKSIZE = 4096
@@ -59,6 +62,11 @@ def warning(*msg):
       print part,
     print
 
+#This function is called by lind_fuse.py
+#In Cappos' code, it stores all of the metadata (duh) at simulation's end
+#But my code saves *pieces* of the metadata *during* the simulation
+#In lieu of modifying lind_fuse.py, I just put this as a dummy function
+def persist_metadata(the_arg): return 0
 
 # This is raised to return an error...
 class SyscallError(Exception):
@@ -140,7 +148,6 @@ def load_fs_special_files():
 
 
 # To have a simple, blank file system, simply run this block of code.
-# 
 def _blank_fs_init():
 
   # kill all left over data files...
@@ -539,8 +546,7 @@ def mkdir_syscall(path, mode):
 
   # ... but always release it...
   try:
-    if path == '':
-      raise SyscallError("mkdir_syscall","ENOENT","Path does not exist.")
+    if path == '': raise SyscallError("mkdir_syscall","ENOENT","Path does not exist.")
 
     truepath = _get_absolute_path(path)
 
@@ -1267,11 +1273,9 @@ def write_syscall(fd, data):
       pass
 
     else:
-      warning('inode is at '+str(inode))
       dataBlockNum = block['location']
-      warning("writing to "+str(dataBlockNum))
-      warning(str(data))
       fileobjecttable[dataBlockNum].writeat(data, position)
+      pass
 
     # and update the position
     filedescriptortable[fd]['position'] += len(data)
@@ -1287,9 +1291,8 @@ def write_syscall(fd, data):
     # end)
     return len(data)
 
-  finally:
-    # ... release the lock
-    filedescriptortable[fd]['lock'].release()
+  # ... release the lock
+  finally: filedescriptortable[fd]['lock'].release()
 
 
 ##### CLOSE  #####
@@ -2022,12 +2025,12 @@ def rename_syscall(old, new):
     block = findBlock(inode)
     
     newname = true_new_path.split('/')[-1]
-    newname = 'd' if IS_DIR(block['mode']) else 'f' + newname
+    newname = ('d' if IS_DIR(block['mode']) else 'f') + newname
     parentBlock['filename_to_inode_dict'][newname] = inode
     path2inode[true_new_path] = inode
 
     oldname = true_old_path.split('/')[-1]
-    oldname = 'd' if IS_DIR(block['mode']) else 'f' + oldname
+    oldname = ('d' if IS_DIR(block['mode']) else 'f') + oldname
 
     del parentBlock['filename_to_inode_dict'][oldname]
     del path2inode[true_old_path]
