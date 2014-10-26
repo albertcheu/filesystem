@@ -977,7 +977,6 @@ def open_syscall(path, flags, mode):
       inode = path2inode[truepath]
       block = findBlock(inode)
       if not IS_DIR(block['mode']):
-
         
         secondaryInode = block['location']#the block number of index block OR data
         secondaryBlock = findBlock(secondaryInode)#the actual index block OR data
@@ -1000,7 +999,7 @@ def open_syscall(path, flags, mode):
             for loc in secondaryBlock['location']:
               fileobjecttable[loc] = openfile(PREFIX+str(loc),True)
             pass
-          else: fileobjecttable[inode] = openfile(PREFIX+str(inode),True)
+          else: fileobjecttable[secondaryInode] = openfile(PREFIX+str(inode),True)
           pass
         pass
 
@@ -1022,7 +1021,10 @@ def open_syscall(path, flags, mode):
       # this is a regular file. 
       #If the file never existed before this function call, store in f.o.t
       if made:
+
         dataBlockNum = block['location'] #we assumed the file fits in 1 block
+        warning("Made block no. "+str(dataBlockNum)+"; will make corresponding file")
+
         thisfo = openfile(PREFIX+str(dataBlockNum),False)
         fileobjecttable[dataBlockNum] = thisfo
         pass
@@ -1646,9 +1648,20 @@ def truncate_syscall(path, length):
   """
     http://linux.die.net/man/2/truncate
   """
-  fd = open_syscall(path, O_RDWR, S_IRWXA)
-  ret = ftruncate_syscall(fd, length)
-  close_syscall(fd)
+  truepath = _get_absolute_path(path)
+  inode = path2inode[truepath]
+  block = findBlock(inode)
+  secondaryInode = block['location']
+  if block['indirect']: secondaryInode = findBlock(secondaryInode)[0]
+  if secondaryInode  not in fileobjecttable:
+    fd = open_syscall(path, O_RDWR, S_IRWXA)
+    ret = ftruncate_syscall(fd, length)
+    close_syscall(fd)
+
+  else:
+    fd = _lookup_fds_by_inode(inode)[0]
+    ret = ftruncate_syscall(fd, length)
+
   return ret
 
 
