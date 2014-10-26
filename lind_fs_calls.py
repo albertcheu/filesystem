@@ -2019,13 +2019,16 @@ def rename_syscall(old, new):
     parentBlock = findBlock(parentinode)
 
     inode = path2inode[true_old_path]
-    #block = findBlock(inode)
+    block = findBlock(inode)
     
     newname = true_new_path.split('/')[-1]
+    newname = 'd' if IS_DIR(block['mode']) else 'f' + newname
     parentBlock['filename_to_inode_dict'][newname] = inode
     path2inode[true_new_path] = inode
 
     oldname = true_old_path.split('/')[-1]
+    oldname = 'd' if IS_DIR(block['mode']) else 'f' + oldname
+
     del parentBlock['filename_to_inode_dict'][oldname]
     del path2inode[true_old_path]
 
