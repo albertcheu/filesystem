@@ -2032,6 +2032,9 @@ def rename_syscall(old, new):
     del parentBlock['filename_to_inode_dict'][oldname]
     del path2inode[true_old_path]
 
+    persist(block,inode)
+    persist(parentBlock,parentinode)
+
   finally:
     theLock.release()
   return 0
