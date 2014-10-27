@@ -913,7 +913,6 @@ def open_syscall(path, flags, mode):
       raise SyscallError("open_syscall","ENOENT","The file does not exist.")
 
     truepath = _get_absolute_path(path)
-    #warning("This is what we are trying to open:",truepath)
     made = False
 
     # is the file missing?
@@ -2024,15 +2023,28 @@ def rename_syscall(old, new):
     newname = true_new_path.split('/')[-1]
     newname = ('d' if IS_DIR(block['mode']) else 'f') + newname
 
-    #new name of file is actually the name of the new parent dir
-    #i.e. "mv someFile someDir/" == "mv someFile someDir/someFile"
+
     if true_new_path in path2inode:
       n = path2inode[true_new_path]
       b = findBlock(n)
-      if IS_DIR(b['mode']): newname = oldname      
-      pass
+      if b == {}: pass
 
-    #TODO: handle case when there is already a file @ true_new_path (free its blocks)
+      #new name of file is actually the name of the new parent dir
+      #i.e. "mv someFile someDir/" == "mv someFile someDir/someFile"
+      elif IS_DIR(b['mode']): newname = oldname      
+
+      #handle case when there is already a file @ true_new_path (free its blocks)
+      else:
+        if b['indirect']:
+          indexBlockNum = b['location']
+          index = findBlock(indexBlockNum)
+          for blockNum in index: freeBlock(blockNum)
+          freeBlock(indexBlockNum)
+          pass
+        else: freeBlock(b['location'])
+        freeBlock(n)
+        pass
+      pass
 
     #moving file to blank spot(s)
     path2inode[true_new_path] = inode
