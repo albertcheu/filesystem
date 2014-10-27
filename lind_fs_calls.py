@@ -2004,7 +2004,6 @@ def flock_syscall(fd, operation):
 def rename_syscall(old, new):
   """
   http://linux.die.net/man/2/rename
-  TODO: this needs to be fixed up.
   """
   theLock.acquire(True)
   try:
@@ -2015,28 +2014,44 @@ def rename_syscall(old, new):
       raise SyscallError("rename_syscall", "ENOENT", "Old file does not exist")
 
     if true_new_path == '':
-      raise SyscallError("rename_syscall", "ENOENT", "New file does not exist")
-
-    trueparentpath_old = _get_absolute_parent_path(true_old_path)
-    parentinode = path2inode[trueparentpath_old]
-    parentBlock = findBlock(parentinode)
+      raise SyscallError("rename_syscall", "ENOENT", "Need new filename")
 
     inode = path2inode[true_old_path]
     block = findBlock(inode)
-    
-    newname = true_new_path.split('/')[-1]
-    newname = ('d' if IS_DIR(block['mode']) else 'f') + newname
-    parentBlock['filename_to_inode_dict'][newname] = inode
-    path2inode[true_new_path] = inode
 
     oldname = true_old_path.split('/')[-1]
-    oldname = ('d' if IS_DIR(block['mode']) else 'f') + oldname
+    oldname = ('d' if IS_DIR(block['mode']) else 'f') + oldname    
+    newname = true_new_path.split('/')[-1]
+    newname = ('d' if IS_DIR(block['mode']) else 'f') + newname
 
-    del parentBlock['filename_to_inode_dict'][oldname]
+    #new name of file is actually the name of the new parent dir
+    #i.e. "mv someFile someDir/" == "mv someFile someDir/someFile"
+    if true_new_path in path2inode:
+      n = path2inode[true_new_path]
+      b = findBlock(n)
+      if IS_DIR(b['mode']): newname = oldname      
+      pass
+
+    #TODO: handle case when there is already a file @ true_new_path (free its blocks)
+
+    #moving file to blank spot(s)
+    path2inode[true_new_path] = inode
     del path2inode[true_old_path]
 
+    trueparentpath_old = _get_absolute_parent_path(true_old_path)
+    oldparentinode = path2inode[trueparentpath_old]
+    oldparentBlock = findBlock(oldparentinode)
+
+    trueparentpath_new =  _get_absolute_parent_path(true_new_path)
+    newparentinode = path2inode[trueparentpath_new]
+    newparentBlock = findBlock(newparentinode)
+
+    newparentBlock['filename_to_inode_dict'][newname] = inode
+    del oldparentBlock['filename_to_inode_dict'][oldname]
+
     persist(block,inode)
-    persist(parentBlock,parentinode)
+    persist(oldparentBlock,oldparentinode)
+    persist(newparentBlock,newparentinode)
 
   finally:
     theLock.release()
