@@ -9,7 +9,7 @@
 
   DO NOT COPY THE CODE!!! That's called plagiarism, kids.
   But I suppose the comments are up for grabs; the code itself is my property
-  10/11/14 - ?
+  10/11/14 - 10/30/14
 """
 BLOCKSIZE = 4096
 MAXBLOCKS = 10000
@@ -62,11 +62,57 @@ def warning(*msg):
       print part,
     print
 
-#This function is called by lind_fuse.py
-#In Cappos' code, it stores all of the metadata (duh) at simulation's end
-#But my code saves *pieces* of the metadata *during* the simulation
-#In lieu of modifying lind_fuse.py, I just put this as a dummy function
-def persist_metadata(the_arg): return 0
+def persist(block, blockNum):
+  '''
+  Very important function!
+  Call this function to preserve a specific block.
+  '''
+  fname = PREFIX+str(blockNum)
+  datastring = serializedata(block)
+  try: removefile(fname)
+  except FileNotFoundError: pass
+  datafo = openfile(fname,True)
+  datafo.writeat(datastring,0)
+  datafo.close()
+  pass
+
+#This function is called by lind_fuse.py at simulation's end
+#as the name suggest, only metadata is saved; actual user data
+#is saved by open/read/write/trunc syscalls
+def persist_metadata(who_needs_this_arg_question_mark):
+  def persistNode(blockNum):
+    block = findBlock(blockNum)
+    persist(block, blockNum)
+
+    #If i am a file's inode...
+    if 'indirect' in block:
+      #if i am indirect, save the index block too!
+      if block['indirect']:
+        secondary = block['location']
+        indexBlock = findBlock(secondary)
+        persist(indexBlock, secondary)
+        pass
+      #If i am a direct file inode, do nothing else!
+      pass
+
+    #if i am a directory, recurse!
+    else:
+      ftid = block['filename_to_inode_dict']
+      for filename in ftid:
+        if filename not in ('d..','d.'):
+          child = ftid[filename]
+          persistNode(child)
+          pass
+        pass
+      pass
+
+    return 0
+
+  #superblock & free block list
+  for i in range(ENDFREE+1): persist(findBlock(i),i)
+  #inodes, starting from root
+  persistNode(ROOTINODE)
+  return 0
 
 # This is raised to return an error...
 class SyscallError(Exception):
@@ -202,21 +248,6 @@ def _blank_fs_init():
     pass    
   pass
 
-def persist(block, blockNum):
-  '''
-  Very important function!
-  Upon any change in metadata (superblock, freeblocklist, rootblock, inodes, indexes),
-  call this function to preserve a specific block.
-  '''
-  fname = PREFIX+str(blockNum)
-  datastring = serializedata(block)
-  try: removefile(fname)
-  except FileNotFoundError: pass
-  datafo = openfile(fname,True)
-  datafo.writeat(datastring,0)
-  datafo.close()
-  pass
-
 def findBlockDetailed(blockNum):
   #return the block, the array it is in (if any), and its index in that array
 
@@ -324,7 +355,6 @@ def allocate():
   #Create the dictionary for the block if necessary
   blockNum = findNextFree()
   while blockNum-ROOTINODE >= len(blocks): blocks.append({})
-  #call persist in whatever calls this function (because it will do actual work)
   return blockNum
 
 def freeBlock(blockNum):
@@ -337,7 +367,7 @@ def freeBlock(blockNum):
   while x[loc] < blockNum: loc += 1
   x.insert(loc,blockNum)
   #we changed this metadata block, so save changes
-  persist(x,loc+STARTFREE)
+  #persist(x,loc+STARTFREE)
   pass
 
 # private helper function that converts a relative path or a path with things
@@ -509,13 +539,9 @@ def access_syscall(path, amode):
 
     raise SyscallError("access_syscall","EACESS","The requested access is denied.")
 
-  finally:
-    #TODO: what must I persist? Isn't this just a check function?
-    persist(superblock,0)
+  # release the lock
+  finally: theLock.release()
 
-    # release the lock
-    theLock.release()
-    pass
   pass
 
 ##### CHDIR  #####
@@ -576,7 +602,7 @@ def mkdir_syscall(path, mode):
     newinode = allocate()
     newinodeentry = {'size':0, 'uid':DEFAULT_UID, 'gid':DEFAULT_GID, 
             'mode':mode | S_IFDIR,  # DIR+rwxr-xr-x
-            'atime':DEFAULT_TIME, 'ctime':DEFAULT_TIME, 'mtime':DEFAULT_TIME,
+            'atime':NEW_TIME, 'ctime':NEW_TIME, 'mtime':NEW_TIME,
             'linkcount':2,    # the number of dir entries...
             'filename_to_inode_dict': {'d.':newinode, 'd..':parentinode}}
     blocks[newinode-ROOTINODE] = newinodeentry
@@ -584,9 +610,8 @@ def mkdir_syscall(path, mode):
     parentBlock['linkcount'] += 1
 
     #persist metadata changes
-    #warning("made "+str(path),"persisting:"+str((parentinode,newinode)))
-    persist(parentBlock, parentinode)
-    persist(blocks[newinode-ROOTINODE],newinode)
+    #persist(parentBlock, parentinode)
+    #persist(blocks[newinode-ROOTINODE],newinode)
 
     # finally, update the path2inode and return success!!!
     path2inode[truepath] = newinode    
@@ -643,7 +668,7 @@ def rmdir_syscall(path):
     #mark as free
     freeBlock(thisinode)
 
-    persist(parentBlock, parentinode)
+    #persist(parentBlock, parentinode)
     #Don't persist thisinode, since the content hasn't changed
 
     # finally, clean up the path2inode and return success!!!
@@ -713,8 +738,8 @@ def link_syscall(oldpath, newpath):
     # ... and the file itself
     oldBlock['linkcount'] += 1
 
-    persist(oldBlock, oldinode)
-    persist(newParentBlock, newparentinode)
+    #persist(oldBlock, oldinode)
+    #persist(newParentBlock, newparentinode)
 
     # finally, update the path2inode and return success!!!
     path2inode[truenewpath] = oldinode    
@@ -777,13 +802,13 @@ def unlink_syscall(path):
       # things if it's open, like wait until it is closed to remove it.
       pass
 
-    persist(parentBlock, parentinode)
-    persist(thisBlock, thisinode)
+    #persist(parentBlock, parentinode)
+    #persist(thisBlock, thisinode)
 
     return 0
 
   finally:
-    persist(superblock,SUPERBLOCKFNAME)
+    #persist(superblock,SUPERBLOCKFNAME)
     theLock.release()
 
 
@@ -949,7 +974,7 @@ def open_syscall(path, flags, mode):
                        'mode':effective_mode,
                        #initially assume we can fit data into one block, growing when necessary
                        'indirect':False, 'location': secondaryNode,
-                       'atime':DEFAULT_TIME, 'ctime':DEFAULT_TIME, 'mtime':DEFAULT_TIME,
+                       'atime':NEW_TIME, 'ctime':NEW_TIME, 'mtime':NEW_TIME,
                        'linkcount':1}
 
       # ... and put it in the table..
@@ -969,7 +994,6 @@ def open_syscall(path, flags, mode):
       
       #We made a new file
       made = True
-
       persist(parentBlock,parentinode)
       persist(newinodeentry, newinode)
       persist("",secondaryNode)
@@ -997,7 +1021,7 @@ def open_syscall(path, flags, mode):
           else: makeFileObject(secondaryInode)
           # reset the size to 0
           block['size'] = 0
-          persist(block, inode)
+          #persist(block, inode)
           pass
         else:
           if block['indirect']:
@@ -1283,7 +1307,7 @@ def write_syscall(fd, data):
     block['size'] = max(block['size'],filedescriptortable[fd]['position'])
 
     #persist the metadata
-    persistFileMetadata(block,inode)
+    #persistFileMetadata(block,inode)
       
     # we always write it all, so just return the length of what we were passed.
     # We do not mention whether we write blank data (if position is after the 
@@ -1358,7 +1382,7 @@ def _close_helper(fd):
     return 0
 
   #no file objects to close
-  if IS_DIR(block['mode']): persist(block, inode)
+  if IS_DIR(block['mode']): pass#persist(block, inode)
 
   # now let's close it and remove it from the table
   elif block['indirect']:
@@ -1644,7 +1668,7 @@ def chmod_syscall(path, mode):
     # should overwrite any previous permissions, according to POSIX.   However,
     # we want to keep the 'type' part of the mode from before
     block['mode'] = (block['mode'] & ~S_IRWXA) | mode
-    persist(block,inode)
+    #persist(block,inode)
 
   finally: theLock.release()
   return 0
@@ -1769,6 +1793,10 @@ def ftruncate_syscall(fd, newsize):
     #persist changes
     persistFileMetadata(block, inode)
 
+    #we have changed the size of this file.
+    #percolate the size change up the file system tree (from leaf to root)
+    percolate()
+
   finally:
     desc = filedescriptortable[fd]
     desc['lock'].release()     
@@ -1822,7 +1850,7 @@ def mknod_syscall(path, mode, dev):
   block = findBlock(inode)
   block['rdev'] = dev
   #warning("persisting "+str(inode))
-  persist(block,inode)
+  #persist(block,inode)
  
   # close the file descriptor... 
   close_syscall(fd)
@@ -2023,11 +2051,12 @@ def rename_syscall(old, new):
     newname = true_new_path.split('/')[-1]
     newname = ('d' if IS_DIR(block['mode']) else 'f') + newname
 
-
     if true_new_path in path2inode:
       n = path2inode[true_new_path]
       b = findBlock(n)
-      if b == {}: pass
+      #should never happen, since if there is a path to something,
+      #it has metadata, stored in the (block numbered by) inode!
+      if b == {}: raise SyscallError("rename_syscall", "funky_business", "You know what this means.")
 
       #new name of file is actually the name of the new parent dir
       #i.e. "mv someFile someDir/" == "mv someFile someDir/someFile"
@@ -2061,9 +2090,9 @@ def rename_syscall(old, new):
     newparentBlock['filename_to_inode_dict'][newname] = inode
     del oldparentBlock['filename_to_inode_dict'][oldname]
 
-    persist(block,inode)
-    persist(oldparentBlock,oldparentinode)
-    persist(newparentBlock,newparentinode)
+    #persist(block,inode)
+    #persist(oldparentBlock,oldparentinode)
+    #persist(newparentBlock,newparentinode)
 
   finally:
     theLock.release()
