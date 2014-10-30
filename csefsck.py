@@ -16,7 +16,24 @@ def getMetadata(blockNum):
     datafo = open(fname)#throws IO error if does not exist
     datastring = datafo.readline().strip()
     datafo.close()
-    return deserializedata(datastring)#throws ValueError if not in right format
+    ans = deserializedata(datastring)
+    #throw ValueError if not in right format
+    if isinstance(ans, dict):
+        #inode or superblock
+        if 'size' not in ans and 'dev_id' not in ans:
+            raise ValueError
+            pass
+        pass
+
+    if isinstance(ans, list):
+        #index or f.b.l have only numbers
+        for num in ans:
+            if not isinstance(num, int): raise ValueError
+            pass
+        pass
+
+    if isinstance(ans, str): raise ValueError
+    return ans
 
 def prelimCheck(blockNums):
 
@@ -24,6 +41,7 @@ def prelimCheck(blockNums):
     if len(blockNums) < 27:
         print 'There is no filesystem here'
         return False
+    blockNums.sort()
 
     for i in range(27):
         #27 files must go from 0 to 26
@@ -33,7 +51,7 @@ def prelimCheck(blockNums):
 
         #Must be able to deserialize each file
 
-        try: getMetadata(i)
+        try: block = getMetadata(i)
         except:
             print 'Cannot deserialize block no.', i
             return False
@@ -73,7 +91,8 @@ def checkFree(usedBlocks):
 def traverse():
     #Go thru the file system
     
-    def checkDir(parentNum, thisNum, usedBlocks):
+    def checkDir(parentNum, thisNum, curPath, usedBlocks):
+        print curPath
 
         try: inode = getMetadata(thisNum)
         except IOError as e:
@@ -103,22 +122,24 @@ def traverse():
             
         #Each directory’s link count matches the number of links in the filename_to_inode_dict
         elif len(children) != inode['linkcount']:
-            print "linkcount incorrect"
+            print "linkcount incorrect at block no.", thisNum
             return False
 
         #We have to go deeper!
         ans = True
         for child in children:
-            if child.startswith('d') and child not in ('d.','d..'):
-                ans = ans and checkDir(thisNum, child, usedBlocks)
+            if child[0]=='d' and child not in ('d.','d..'):
+                ans = ans and checkDir(thisNum, children[child], curPath+child+'/', usedBlocks)
                 pass
-            elif child.startswith('f'):
-                ans = ans and checkFile(child, usedBlocks)
+            elif child[0]=='f':
+                ans = ans and checkFile(children[child], curPath+child, usedBlocks)
                 pass
             pass
         return ans
 
-    def checkFile(blockNum, usedBlocks):
+    def checkFile(blockNum, curPath, usedBlocks):
+        print curPath
+
         try: inode = getMetadata(blockNum)
         except IOError as e:
             print 'Block', blockNum, 'has no associated file'
@@ -137,23 +158,25 @@ def traverse():
 
             #If the data contained in a location pointer is an array, that indirect is one (True)
             if not inode['indirect']:
-                print 'Inode', blockNum 'is indirect but indirect field is set to False'
+                print 'Inode', blockNum, 'is indirect but indirect field is set to False'
                 return False
 
             ans = True
             for otherNum in index:
                 #Do the files exist for these blocks?
                 try: open(PREFIX+str(otherNum))
-                except:
-                    print 'Block', otherNum, 'has no associated file'
+                except IOError as e:
                     ans = False
+                    print 'Block', otherNum, 'has no associated file'
+
                 usedBlocks.add(otherNum)
                 pass
 
             #Check size
-            if inode['size'] < BLOCKSIZE*(len(index)-1) or inode['size'] >BLOCKSIZE*len(index):
-                print 'Incorrect size for block no.', blockNum
+            if (inode['size'] < (BLOCKSIZE*(len(index)-1))) or (inode['size'] > (BLOCKSIZE*len(index))):
                 ans = False
+                print 'Incorrect size for block no.', blockNum
+
 
             return ans
 
@@ -164,7 +187,7 @@ def traverse():
         except ValueError as e:#when the indirect block is raw data
             usedBlocks.add(secondary)
             if inode['indirect']:
-                print 'Inode', blockNum 'is not indirect but indirect field is set to True'
+                print 'Inode', blockNum, 'is not indirect but indirect field is set to True'
                 return False
 
             #Check size                
@@ -177,18 +200,20 @@ def traverse():
         return False #should never reach this!
 
     usedBlocks = set()
-    checkDir(26,26,usedBlocks)
-    return True, usedBlocks
+    b = checkDir(26,26,'/',usedBlocks)
+    return b, usedBlocks
 
 if callfunc == 'initialize':
     entries,blockNums = listdir(), []
     for e in entries:
         if e.startswith(PREFIX): blockNums.append(int(e[len(PREFIX):]))
         pass
-    if prelimCheck(blockNums):
-        ok,usedBlocks = traverse()
-        if ok and checkFree(usedBlocks):
-            print "The file system is alright! Have a nice day, good sir or ma'am"
-            pass
+    ok1 = prelimCheck(blockNums)
+    if ok1:
+        ok2,usedBlocks = traverse()
+        if ok2: ok3 = checkFree(usedBlocks)
         pass
-    print "Please fix the file system"
+    if ok1 and ok2 and ok3:
+        print "The file system is alright! Have a nice day, good sir or ma'am"
+        pass
+    else: print "Please fix the file system"

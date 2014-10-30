@@ -918,7 +918,8 @@ def makeFileObject(blockNum):
   # if it exists, close the existing file object so I can remove it...
   if blockNum in fileobjecttable: fileobjecttable[blockNum].close()
   # remove the file...
-  removefile(PREFIX+str(blockNum))
+  try: removefile(PREFIX+str(blockNum))
+  except: pass
   # always open the file.
   fileobjecttable[blockNum] = openfile(PREFIX+str(blockNum),True)
   fileobjecttable[blockNum].writeat('\0'*BLOCKSIZE,0)
@@ -957,6 +958,12 @@ def open_syscall(path, flags, mode):
       if not IS_DIR(findBlock(parentinode)['mode']):
         raise SyscallError("open_syscall","ENOTDIR","Path's parent is not a directory.")
 
+      # be sure there aren't extra mode bits... No errno seems to exist for this.
+      assert(mode & (S_IRWXA|S_FILETYPEFLAGS) == mode)
+      effective_mode = (S_IFCHR | mode) if (S_IFCHR & flags) != 0 else (S_IFREG | mode)
+
+      if IS_DIR(mode): raise SyscallError("open_syscall","EINVAL","Can't open dir that doesnt exist")
+
       # okay, great!!!   We're ready to go!   Let's make the new file...
       filename = truepath.split('/')[-1]
 
@@ -965,11 +972,6 @@ def open_syscall(path, flags, mode):
       #we have one level of indirection
       secondaryNode = allocate()
 
-      # be sure there aren't extra mode bits... No errno seems to exist for this.
-      assert(mode & (S_IRWXA|S_FILETYPEFLAGS) == mode)
-      effective_mode = (S_IFCHR | mode) if (S_IFCHR & flags) != 0 else (S_IFREG | mode)
-
-      if IS_DIR(mode): raise SyscallError("open_syscall","EINVAL","Can't open dir that doesnt exist")
       newinodeentry = {'size':0, 'uid':DEFAULT_UID, 'gid':DEFAULT_GID, 
                        'mode':effective_mode,
                        #initially assume we can fit data into one block, growing when necessary
@@ -1025,7 +1027,7 @@ def open_syscall(path, flags, mode):
           pass
         else:
           if block['indirect']:
-            for loc in secondaryBlock['location']:
+            for loc in secondaryBlock:
               fileobjecttable[loc] = openfile(PREFIX+str(loc),True)
             pass
           else: fileobjecttable[secondaryInode] = openfile(PREFIX+str(secondaryInode),True)
@@ -1192,10 +1194,6 @@ def read_syscall(fd, count):
     #If indirect...
     else:
       filesize = block['size']
-      #throw error if you can't read that many bytes
-      if filesize-position < count:
-        raise SyscallError("read_syscall","foobar...","Can't read that many bytes from that position")
-        pass
 
       data = ""
       #find which block to start from and the position within that block
@@ -1273,6 +1271,9 @@ def write_syscall(fd, data):
     # let's get the position...
     position = filedescriptortable[fd]['position']
     if position < 0: raise SyscallError("write_syscall","foobar...","Please lseek to a positive number")
+
+    #resize
+    #if len(data)+position != block['size']: ftruncate_syscall(fd,len(data)+position,True)
 
     #actually write the data
     if block['indirect']:
@@ -1698,7 +1699,7 @@ def truncate_syscall(path, length):
 
 
 #### FTRUNCATE ####
-def ftruncate_syscall(fd, newsize):
+def ftruncate_syscall(fd, newsize,calledFromWrite=False):
   """
     http://linux.die.net/man/2/ftruncate
   """
@@ -1712,7 +1713,7 @@ def ftruncate_syscall(fd, newsize):
   desc = filedescriptortable[fd]
   
   # Acquire the fd lock
-  desc['lock'].acquire(True)
+  if not calledFromWrite: desc['lock'].acquire(True)
 
   try: 
     # we will need the file size in a moment, but also need to check the type
@@ -1730,14 +1731,18 @@ def ftruncate_syscall(fd, newsize):
 
     #If new size of file is bigger than current one...
     if newsize > filesize:
+      warning('ftruncate will grow file')
 
       #direct stays as direct if the new size fits in one block
       #happily, unused bytes in the block are already \0
-      if newsize <= BLOCKSIZE: pass
+      if newsize <= BLOCKSIZE:
+        warning('filesize < newsize <= BLOCKSIZE, so only change size variable')
+        pass
 
       else:
         #if we're a direct block, change to indirect
         if not block['indirect']:
+          warning("if we're a direct block, change to indirect")
           block['indirect'] = True
           #'location' slot in block now points to the index block
           #old data remains, but pointed to by the index block
@@ -1748,6 +1753,7 @@ def ftruncate_syscall(fd, newsize):
           pass
 
         #Add needed blocks
+        indexLoc = block['location']
         index = blocks[indexLoc-ROOTINODE]
         while len(index) < neededBlocks:
           index.append(allocate())
@@ -1756,9 +1762,10 @@ def ftruncate_syscall(fd, newsize):
         pass
       pass
 
-    #Otherwise, no need to grow
+    #Otherwise, shrink
     #clip off excess blocks
     elif block['indirect'] == True:
+      warning('was indirect, now must be direct')
       indexLoc = block['location']
       index = findBlock(indexLoc)
       while len(index) > neededBlocks:
@@ -1795,11 +1802,11 @@ def ftruncate_syscall(fd, newsize):
 
     #we have changed the size of this file.
     #percolate the size change up the file system tree (from leaf to root)
-    percolate()
+    #percolate()
 
   finally:
     desc = filedescriptortable[fd]
-    desc['lock'].release()     
+    if not calledFromWrite: desc['lock'].release()     
     pass
 
   return 0
