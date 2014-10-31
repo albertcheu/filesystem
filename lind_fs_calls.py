@@ -2051,6 +2051,22 @@ def flock_syscall(fd, operation):
     filedescriptortable[fd]['lock'].release()
     return 0
 
+def renameHelper(dirBlock, oldPrefix, newPrefix):
+  #dirBlock had path oldPrefix but is now at newPrefix
+  #its children currently have paths beginning with oldPrefix but they must change to newPrefix
+  children = dirBlock['filename_to_inode_dict']
+  for childName in children:
+    if childName not in ('d.','d..'):
+      inode = children[childName]
+      oldChildPath, newChildPath = oldPrefix+'/'+childName[1:], newPrefix+'/'+childName[1:]
+      del path2inode[oldChildPath]
+      path2inode[newChildPath] = inode
+      childBlock = findBlock(inode)
+      if IS_DIR(childBlock['mode']): renameHelper(childBlock, oldChildPath, newChildPath)
+      pass
+    pass
+  pass
+
 def rename_syscall(old, new, calledFromSelf=False):
   """
   http://linux.die.net/man/2/rename
@@ -2072,6 +2088,7 @@ def rename_syscall(old, new, calledFromSelf=False):
     oldname = ('d' if IS_DIR(block['mode']) else 'f') + true_old_path.split('/')[-1]
     newname = ('d' if IS_DIR(block['mode']) else 'f') + true_new_path.split('/')[-1]
 
+    didRecursion = False
     #if the new path already exists...
     if true_new_path in path2inode:
       n = path2inode[true_new_path]
@@ -2084,6 +2101,7 @@ def rename_syscall(old, new, calledFromSelf=False):
       elif IS_DIR(b['mode']):
         true_new_path += '/'+oldname[1:]
         rename_syscall(old,true_new_path,True)
+        didRecursion = True
         pass
 
       #handle case when there is already a file @ true_new_path (free its blocks)
@@ -2099,20 +2117,24 @@ def rename_syscall(old, new, calledFromSelf=False):
         pass
       pass
 
-    #moving file to blank spot
-    path2inode[true_new_path] = inode
-    del path2inode[true_old_path]
+    if not didRecursion:
+      #moving to blank spot
+      path2inode[true_new_path] = inode
+      del path2inode[true_old_path]
 
-    trueparentpath_old = _get_absolute_parent_path(true_old_path)
-    oldparentinode = path2inode[trueparentpath_old]
-    oldparentBlock = findBlock(oldparentinode)
+      trueparentpath_old = _get_absolute_parent_path(true_old_path)
+      oldparentinode = path2inode[trueparentpath_old]
+      oldparentBlock = findBlock(oldparentinode)
 
-    trueparentpath_new =  _get_absolute_parent_path(true_new_path)
-    newparentinode = path2inode[trueparentpath_new]
-    newparentBlock = findBlock(newparentinode)
+      trueparentpath_new =  _get_absolute_parent_path(true_new_path)
+      newparentinode = path2inode[trueparentpath_new]
+      newparentBlock = findBlock(newparentinode)
 
-    newparentBlock['filename_to_inode_dict'][newname] = inode
-    del oldparentBlock['filename_to_inode_dict'][oldname]
+      newparentBlock['filename_to_inode_dict'][newname] = inode
+      del oldparentBlock['filename_to_inode_dict'][oldname]
+      
+      #all keys in path2inode starting with true_old_path are changed to start with true_new_path
+      if IS_DIR(block['mode']): renameHelper(block, true_old_path, true_new_path)
 
   finally:
     if not calledFromSelf: theLock.release()
