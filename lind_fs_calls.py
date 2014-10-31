@@ -381,7 +381,7 @@ def freeBlock(blockNum):
   #runs in linear time... would be better if tree/heap were used
   #but we cant use modules (like Queue), which sucks
   loc = 0
-  while x[loc] < blockNum: loc += 1
+  while loc < len(x) and x[loc] < blockNum: loc += 1
   x.insert(loc,blockNum)
   pass
 
@@ -763,6 +763,18 @@ def link_syscall(oldpath, newpath):
   finally: theLock.release()
 
 ##### UNLINK  #####
+
+def removeFile(blockNum, block):
+  if block['indirect']:
+    indexBlockNum = block['location']
+    index = findBlock(indexBlockNum)
+    for bN in index: freeBlock(bN)
+    freeBlock(indexBlockNum)
+    pass
+  else: freeBlock(block['location'])
+  freeBlock(blockNum)
+  return 0
+
 def unlink_syscall(path):
   """ 
     http://linux.die.net/man/2/unlink
@@ -793,10 +805,10 @@ def unlink_syscall(path):
     parentBlock = findBlock(parentinode)
 
     # We're ready to go!   Let's clean up the file entry
-    dirname = 'f'+truepath.split('/')[-1]
+    fname = 'f'+truepath.split('/')[-1]
 
     # remove the entry from the parent...
-    del parentBlock['filename_to_inode_dict'][dirname]
+    del parentBlock['filename_to_inode_dict'][fname]
 
     # decrement the link count on the dir...
     parentBlock['linkcount'] -= 1
@@ -807,24 +819,18 @@ def unlink_syscall(path):
     # decrement the link count...
     thisBlock['linkcount'] -= 1
 
-    # If zero, remove the entry from the inode table
+    # If zero, remove the entry
     if thisBlock['linkcount'] == 0:
-      #del superblock['inodetable'][thisinode]
-      #UMMM...I THINK THIS IS RIGHT?
-      freeBlock(thisinode)
+      removeFile(thisinode,thisBlock)
 
-      # TODO: I also would remove the file.   However, I need to do special
-      # things if it's open, like wait until it is closed to remove it.
+      if thisinode in fileobjecttable:
+        #fileobjecttable[thisinode].close()
+        #del fileobjecttable[thisinode]
+        pass
       pass
-
-    #persist(parentBlock, parentinode)
-    #persist(thisBlock, thisinode)
-
     return 0
 
-  finally:
-    #persist(superblock,SUPERBLOCKFNAME)
-    theLock.release()
+  finally: theLock.release()
 
 
 ##### STAT  #####
@@ -1287,6 +1293,9 @@ def write_syscall(fd, data):
     position = filedescriptortable[fd]['position']
     if position < 0: raise SyscallError("write_syscall","EINVAL","Please lseek to a positive number")
 
+    warning('We are writing %d bytes starting from position %d' % (len(data), position))
+    warning('Our current file size is %d' % block['size'])
+
     #resize
     if len(data)+position != block['size']: ftruncate_syscall(fd,len(data)+position,True)
 
@@ -1398,7 +1407,7 @@ def _close_helper(fd):
     return 0
 
   #no file objects to close
-  if IS_DIR(block['mode']): pass#persist(block, inode)
+  if IS_DIR(block['mode']): pass
 
   # now let's close it and remove it from the table
   elif block['indirect']:
@@ -1727,6 +1736,7 @@ def ftruncate_syscall(fd, newsize,calledFromWrite=False):
 
   desc = filedescriptortable[fd]
   
+  warning('This ftruncate call was started by write_syscall.',calledFromWrite)
   # Acquire the fd lock
   if not calledFromWrite: desc['lock'].acquire(True)
 
@@ -2105,17 +2115,7 @@ def rename_syscall(old, new, calledFromSelf=False):
         pass
 
       #handle case when there is already a file @ true_new_path (free its blocks)
-      else:
-        if b['indirect']:
-          indexBlockNum = b['location']
-          index = findBlock(indexBlockNum)
-          for blockNum in index: freeBlock(blockNum)
-          freeBlock(indexBlockNum)
-          pass
-        else: freeBlock(b['location'])
-        freeBlock(n)
-        pass
-      pass
+      else: removeFile(n,b)
 
     if not didRecursion:
       #moving to blank spot
