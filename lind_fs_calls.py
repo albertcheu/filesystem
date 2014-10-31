@@ -153,9 +153,8 @@ def load_fs(name=SUPERBLOCKFNAME):
     f.close()
 
     #load the blocks!
-    for i in range(MAXBLOCKS):
-      if not restore(i): break
-      pass
+    restore()
+
     superblock["mount"] += 1
 
     # I need to rebuild the path2inode table. let's do this!
@@ -278,35 +277,53 @@ def findBlockDetailed(blockNum):
 #Just gimme the dictionary
 def findBlock(blockNum): return findBlockDetailed(blockNum)[0]
 
-def restore(blockNum):
+def restore():
 
-  # open the file and write out the information...
+  def restore_single(blockNum):
+    # open the file and write out the information...
+    datafo = openfile(PREFIX+str(blockNum),False)
+    datastring = datafo.readat(None, 0)
+    datafo.close()
+    # get what we stored
+    data = deserializedata(datastring)
 
-  try: datafo = openfile(PREFIX+str(blockNum),False)
-  except FileNotFoundError, e: return False
+    #Get blank dictionary (grow the list of blocks if necessary)
+    block, targetArray, index = findBlockDetailed(blockNum)
+    # should only be called with a fresh system...
+    assert(block == {})
 
-  datastring = datafo.readat(None, 0)
-  datafo.close()
+    if blockNum in (0, ROOTINODE):
+      # I need to put things in the dict, but it's not a global...   so instead
+      # add them one at a time.   It should be empty to start with
+      for item in data: block[item] = data[item]
+      pass
+    else: targetArray[index] = data
 
-  # get what we stored
-  try: data = deserializedata(datastring)
-  #If we cannot deserialize, it means the block is "pure data" (a file)
-  #which will be modified via syscalls (read/write/trunc, etc.)
-  except: return True
+    #We are done if it is superblock or elem. of free block list
+    if blockNum < ROOTINODE: return
 
-  block, targetArray, index = findBlockDetailed(blockNum)
+    #If actually part of file system, recurse (maybe)
+    block = targetArray[index]
 
-  # should only be called with a fresh system...
-  assert(block == {})
+    #file's index block -> do nothing else
+    if isinstance(block, list): return
 
-  if blockNum in (0, ROOTINODE):
-    # I need to put things in the dict, but it's not a global...   so instead
-    # add them one at a time.   It should be empty to start with
-    for item in data: block[item] = data[item]
-    pass
-  else: targetArray[index] = data
+    #This is a dir -> restore its children
+    if 'filename_to_inode_dict' in block:
+      children = block['filename_to_inode_dict']
+      if len(children) == 2: return
+      for childName in children:
+        if childName not in ('d.','d..'): restore_single(children[childName])
+        pass
+      pass
 
-  return True
+    #"big" file's inode -> restore the index block
+    elif block['indirect']: restore_single(block['location'])
+
+    return
+
+  for i in range(ROOTINODE+1):
+    restore_single(i)
 
 #path is already added.
 def _rebuild_path2inode_helper(path, inode):
@@ -366,8 +383,6 @@ def freeBlock(blockNum):
   loc = 0
   while x[loc] < blockNum: loc += 1
   x.insert(loc,blockNum)
-  #we changed this metadata block, so save changes
-  #persist(x,loc+STARTFREE)
   pass
 
 # private helper function that converts a relative path or a path with things
@@ -1270,10 +1285,10 @@ def write_syscall(fd, data):
 
     # let's get the position...
     position = filedescriptortable[fd]['position']
-    if position < 0: raise SyscallError("write_syscall","foobar...","Please lseek to a positive number")
+    if position < 0: raise SyscallError("write_syscall","EINVAL","Please lseek to a positive number")
 
     #resize
-    #if len(data)+position != block['size']: ftruncate_syscall(fd,len(data)+position,True)
+    if len(data)+position != block['size']: ftruncate_syscall(fd,len(data)+position,True)
 
     #actually write the data
     if block['indirect']:
@@ -1729,6 +1744,8 @@ def ftruncate_syscall(fd, newsize,calledFromWrite=False):
     #How many blocks does the newsize need?
     neededBlocks = (newsize / BLOCKSIZE) + (1 if newsize % BLOCKSIZE else 0)
 
+    warning('New size:%d, old size:%d'%(newsize,filesize))
+
     #If new size of file is bigger than current one...
     if newsize > filesize:
       warning('ftruncate will grow file')
@@ -1765,7 +1782,7 @@ def ftruncate_syscall(fd, newsize,calledFromWrite=False):
     #Otherwise, shrink
     #clip off excess blocks
     elif block['indirect'] == True:
-      warning('was indirect, now must be direct')
+      warning('was indirect and must shrink')
       indexLoc = block['location']
       index = findBlock(indexLoc)
       while len(index) > neededBlocks:
@@ -1775,6 +1792,7 @@ def ftruncate_syscall(fd, newsize,calledFromWrite=False):
         index.pop()
         pass
       if len(index) == 1:
+        warning('changing from indirect to direct')
         block['indirect'] = False
         block['location'] = index[0]
         freeBlock(indexLoc)
@@ -1782,27 +1800,25 @@ def ftruncate_syscall(fd, newsize,calledFromWrite=False):
       pass
 
     else: #newsize <= filesize, and direct
-      dataBlockNum = block['location']
-      try:
-        to_save = fileobjecttable[dataBlockNum].readat(newsize,0)
-        fileobjecttable[dataBlockNum].close()
-      except: to_save = ""
+      warning('newsize <= filesize (direct)')
+
+      #dataBlockNum = block['location']
+      #try:
+        #to_save = fileobjecttable[dataBlockNum].readat(newsize,0)
+        #fileobjecttable[dataBlockNum].close()
+      #except: to_save = ""
 
       # remove the old file
-      removefile(PREFIX+str(inode))
+      #removefile(PREFIX+str(inode))
       # make a new blank one
-      fileobjecttable[dataBlockNum] = openfile(PREFIX+str(dataBlockNum),True)
-      fileobjecttable[dataBlockNum].writeat(to_save, 0)
+      #fileobjecttable[dataBlockNum] = openfile(PREFIX+str(dataBlockNum),True)
+      #fileobjecttable[dataBlockNum].writeat(to_save, 0)
       pass
       
     block['size'] = newsize
 
     #persist changes
-    persistFileMetadata(block, inode)
-
-    #we have changed the size of this file.
-    #percolate the size change up the file system tree (from leaf to root)
-    #percolate()
+    #persistFileMetadata(block, inode)
 
   finally:
     desc = filedescriptortable[fd]
@@ -2035,11 +2051,11 @@ def flock_syscall(fd, operation):
     filedescriptortable[fd]['lock'].release()
     return 0
 
-def rename_syscall(old, new):
+def rename_syscall(old, new, calledFromSelf=False):
   """
   http://linux.die.net/man/2/rename
   """
-  theLock.acquire(True)
+  if not calledFromSelf: theLock.acquire(True)
   try:
     true_old_path = _get_absolute_path(old)
     true_new_path = _get_absolute_path(new)
@@ -2053,11 +2069,10 @@ def rename_syscall(old, new):
     inode = path2inode[true_old_path]
     block = findBlock(inode)
 
-    oldname = true_old_path.split('/')[-1]
-    oldname = ('d' if IS_DIR(block['mode']) else 'f') + oldname    
-    newname = true_new_path.split('/')[-1]
-    newname = ('d' if IS_DIR(block['mode']) else 'f') + newname
+    oldname = ('d' if IS_DIR(block['mode']) else 'f') + true_old_path.split('/')[-1]
+    newname = ('d' if IS_DIR(block['mode']) else 'f') + true_new_path.split('/')[-1]
 
+    #if the new path already exists...
     if true_new_path in path2inode:
       n = path2inode[true_new_path]
       b = findBlock(n)
@@ -2065,9 +2080,11 @@ def rename_syscall(old, new):
       #it has metadata, stored in the (block numbered by) inode!
       if b == {}: raise SyscallError("rename_syscall", "funky_business", "You know what this means.")
 
-      #new name of file is actually the name of the new parent dir
-      #i.e. "mv someFile someDir/" == "mv someFile someDir/someFile"
-      elif IS_DIR(b['mode']): newname = oldname      
+      #if the new path is to a directory, the data becomes an entry of the directory
+      elif IS_DIR(b['mode']):
+        true_new_path += '/'+oldname[1:]
+        rename_syscall(old,true_new_path,True)
+        pass
 
       #handle case when there is already a file @ true_new_path (free its blocks)
       else:
@@ -2082,7 +2099,7 @@ def rename_syscall(old, new):
         pass
       pass
 
-    #moving file to blank spot(s)
+    #moving file to blank spot
     path2inode[true_new_path] = inode
     del path2inode[true_old_path]
 
@@ -2097,10 +2114,7 @@ def rename_syscall(old, new):
     newparentBlock['filename_to_inode_dict'][newname] = inode
     del oldparentBlock['filename_to_inode_dict'][oldname]
 
-    #persist(block,inode)
-    #persist(oldparentBlock,oldparentinode)
-    #persist(newparentBlock,newparentinode)
-
   finally:
-    theLock.release()
+    if not calledFromSelf: theLock.release()
+    pass
   return 0
