@@ -764,14 +764,18 @@ def link_syscall(oldpath, newpath):
 
 ##### UNLINK  #####
 
-def removeFile(blockNum, block):
+def freeFile(blockNum, block):
   if block['indirect']:
+
     indexBlockNum = block['location']
     index = findBlock(indexBlockNum)
+
     for bN in index: freeBlock(bN)
     freeBlock(indexBlockNum)
     pass
+
   else: freeBlock(block['location'])
+
   freeBlock(blockNum)
   return 0
 
@@ -821,13 +825,14 @@ def unlink_syscall(path):
 
     # If zero, remove the entry
     if thisBlock['linkcount'] == 0:
-      removeFile(thisinode,thisBlock)
+      freeFile(thisinode,thisBlock)
 
       if thisinode in fileobjecttable:
         #fileobjecttable[thisinode].close()
         #del fileobjecttable[thisinode]
         pass
       pass
+
     return 0
 
   finally: theLock.release()
@@ -960,7 +965,7 @@ def open_syscall(path, flags, mode):
       raise SyscallError("open_syscall","ENOENT","The file does not exist.")
 
     truepath = _get_absolute_path(path)
-    made = False
+    #made = False
 
     # is the file missing?
     if truepath not in path2inode:
@@ -991,12 +996,12 @@ def open_syscall(path, flags, mode):
       # first, make the new file's entry...
       newinode = allocate()
       #we have one level of indirection
-      secondaryNode = allocate()
+      secondaryInode = allocate()
 
       newinodeentry = {'size':0, 'uid':DEFAULT_UID, 'gid':DEFAULT_GID, 
                        'mode':effective_mode,
                        #initially assume we can fit data into one block, growing when necessary
-                       'indirect':False, 'location': secondaryNode,
+                       'indirect':False, 'location': secondaryInode,
                        'atime':NEW_TIME, 'ctime':NEW_TIME, 'mtime':NEW_TIME,
                        'linkcount':1}
 
@@ -1013,13 +1018,10 @@ def open_syscall(path, flags, mode):
       path2inode[truepath] = newinode
 
       # this file must not exist or it's an internal error!!!
-      openfile(PREFIX+str(newinode),True).close()
+      makeFileObject(secondaryInode)
       
-      #We made a new file
-      made = True
       persist(parentBlock,parentinode)
       persist(newinodeentry, newinode)
-      persist("",secondaryNode)
 
     # if the file did exist...
     else:
@@ -1036,21 +1038,24 @@ def open_syscall(path, flags, mode):
         # If O_RDONLY is set, the behavior is undefined, so this is okay
         #If we are truncating the file, we are erasing before opening
         if (O_TRUNC & flags):
+
           #Make file objects for all linddata.X that contain data
           #makeFileObject will destroy existing blocks and create blank replacements
           if block['indirect']:
             for loc in secondaryBlock['location']: makeFileObject(loc)
             pass
           else: makeFileObject(secondaryInode)
+
           # reset the size to 0
           block['size'] = 0
-          #persist(block, inode)
+
           pass
+
         else:
           if block['indirect']:
-            for loc in secondaryBlock:
-              fileobjecttable[loc] = openfile(PREFIX+str(loc),True)
+            for loc in secondaryBlock: fileobjecttable[loc] = openfile(PREFIX+str(loc),True)
             pass
+
           else: fileobjecttable[secondaryInode] = openfile(PREFIX+str(secondaryInode),True)
           pass
         pass
@@ -1067,17 +1072,6 @@ def open_syscall(path, flags, mode):
   
     # Note, directories can be opened (to do getdents, etc). We shouldn't
     # actually open something in this case...
-
-    # Is it a regular file?
-    #If the file never existed before this function call, store in f.o.t
-    if IS_REG(block['mode']) and made:
-      dataBlockNum = block['location'] #we assumed the file fits in 1 block
-      #warning("Made block no. "+str(dataBlockNum)+"; will make corresponding file")
-      
-      thisfo = openfile(PREFIX+str(dataBlockNum),False)
-      fileobjecttable[dataBlockNum] = thisfo
-      
-      pass
 
     # I'm going to assume that if you use O_APPEND I only need to 
     # start the pointer in the right place.
@@ -1120,6 +1114,7 @@ def lseek_syscall(fd, offset, whence):
   # Acquire the fd lock...
   filedescriptortable[fd]['lock'].acquire(True)
   # ... but always release it...
+
   try:
     # we will need the file size in a moment, but also need to check the type
     try:
@@ -1142,18 +1137,13 @@ def lseek_syscall(fd, offset, whence):
       raise SyscallError("lseek_syscall","EINVAL","File descriptor does not refer to a regular file or directory.")
 
     # Figure out where we will seek to and check it...
-    if whence == SEEK_SET:
-      eventualpos = offset
-    elif whence == SEEK_CUR:
-      eventualpos = filedescriptortable[fd]['position']+offset
-    elif whence == SEEK_END:
-      eventualpos = filesize+offset
-    else:
-      raise SyscallError("lseek_syscall","EINVAL","Invalid whence.")
+    if whence == SEEK_SET: eventualpos = offset
+    elif whence == SEEK_CUR: eventualpos = filedescriptortable[fd]['position']+offset
+    elif whence == SEEK_END: eventualpos = filesize+offset
+    else: raise SyscallError("lseek_syscall","EINVAL","Invalid whence.")
 
     # did we fall off the front?
-    if eventualpos < 0:
-      raise SyscallError("lseek_syscall","EINVAL","Seek before position 0 in file.")
+    if eventualpos < 0: raise SyscallError("lseek_syscall","EINVAL","Seek before position 0 in file.")
 
     # did we fall off the back?
     # if so, we'll handle this when we do a write.   The correct behavior is
@@ -1164,9 +1154,8 @@ def lseek_syscall(fd, offset, whence):
 
     return eventualpos
 
-  finally:
-    # ... release the lock
-    filedescriptortable[fd]['lock'].release()
+  # ... release the lock
+  finally: filedescriptortable[fd]['lock'].release()
 
 
 ##### READ  #####
@@ -1205,21 +1194,18 @@ def read_syscall(fd, count):
 
     #If the block is direct, just do a simple read of the bytes
     if not block['indirect']:
-
       dataBlockNum = block['location']
-
       data = fileobjecttable[dataBlockNum].readat(count, position)
-
       pass
 
     #If indirect...
     else:
-      filesize = block['size']
+      data, filesize = "", block['size']
 
-      data = ""
       #find which block to start from and the position within that block
       startIndex,modPosition = position / BLOCKSIZE, position % BLOCKSIZE
       blockNumbers = findBlock(block['location'])#a list of numbers
+
       for blockNum in blockNumbers[startIndex:]:
         #bytes left in this block
         bytesLeft = BLOCKSIZE - modPosition
@@ -1234,25 +1220,10 @@ def read_syscall(fd, count):
     filedescriptortable[fd]['position'] += len(data)
     return data
 
-  finally:
-    # ... release the lock
-    filedescriptortable[fd]['lock'].release()
-
+  # ... release the lock
+  finally: filedescriptortable[fd]['lock'].release()
 
 ##### WRITE  #####
-def persistFileMetadata(block, blockNum):
-  #persist inode and/or index block
-
-  #persist index block if it exists
-  if 'indirect' in block and block['indirect']:
-    indexLoc = block['location']
-    persist(blocks[indexLoc-ROOTINODE],indexLoc)
-    pass
-
-  #persist inode
-  persist(block,blockNum)
-  pass
-
 
 def write_syscall(fd, data):
   """ 
@@ -1331,9 +1302,6 @@ def write_syscall(fd, data):
     # update the file size if we've extended it
     block['size'] = max(block['size'],filedescriptortable[fd]['position'])
 
-    #persist the metadata
-    #persistFileMetadata(block,inode)
-      
     # we always write it all, so just return the length of what we were passed.
     # We do not mention whether we write blank data (if position is after the 
     # end)
@@ -1402,9 +1370,9 @@ def _close_helper(fd):
 
   # I should only close here if it's the last use of the file.   This can
   # happen due to dup, multiple opens, etc.
-  if len(fdsforinode) > 1:
-    # Is there more than one descriptor open?   If so, return success
-    return 0
+
+  # Is there more than one descriptor open?   If so, return success
+  if len(fdsforinode) > 1: return 0
 
   #no file objects to close
   if IS_DIR(block['mode']): pass
@@ -1431,7 +1399,6 @@ def close_syscall(fd):
   """ 
     http://linux.die.net/man/2/close
   """
-  # BUG: I probably need a filedescriptortable lock to prevent race conditions
   # check the fd
   if fd not in filedescriptortable:
     raise SyscallError("close_syscall","EBADF","Invalid file descriptor.")
@@ -1440,6 +1407,7 @@ def close_syscall(fd):
       return 0
   except KeyError:
     pass
+
   # Acquire the fd lock, if there is one.
   if 'lock' in filedescriptortable[fd]:
     filedescriptortable[fd]['lock'].acquire(True)
@@ -1809,26 +1777,11 @@ def ftruncate_syscall(fd, newsize,calledFromWrite=False):
         pass
       pass
 
-    else: #newsize <= filesize, and direct
-      warning('newsize <= filesize (direct)')
+    #newsize <= filesize, and direct
+    else: warning('newsize <= filesize <= BLOCKSIZE, so only change size variable')
 
-      #dataBlockNum = block['location']
-      #try:
-        #to_save = fileobjecttable[dataBlockNum].readat(newsize,0)
-        #fileobjecttable[dataBlockNum].close()
-      #except: to_save = ""
-
-      # remove the old file
-      #removefile(PREFIX+str(inode))
-      # make a new blank one
-      #fileobjecttable[dataBlockNum] = openfile(PREFIX+str(dataBlockNum),True)
-      #fileobjecttable[dataBlockNum].writeat(to_save, 0)
-      pass
-      
     block['size'] = newsize
-
-    #persist changes
-    #persistFileMetadata(block, inode)
+    pass
 
   finally:
     desc = filedescriptortable[fd]
@@ -2101,21 +2054,22 @@ def rename_syscall(old, new, calledFromSelf=False):
     didRecursion = False
     #if the new path already exists...
     if true_new_path in path2inode:
-      n = path2inode[true_new_path]
-      b = findBlock(n)
+      existingInode = path2inode[true_new_path]
+      existingBlock = findBlock(existingInode)
+
       #should never happen, since if there is a path to something,
       #it has metadata, stored in the (block numbered by) inode!
-      if b == {}: raise SyscallError("rename_syscall", "funky_business", "You know what this means.")
+      if existingBlock == {}: raise SyscallError("rename_syscall", "funky_business", "You know what this means.")
 
       #if the new path is to a directory, the data becomes an entry of the directory
-      elif IS_DIR(b['mode']):
+      elif IS_DIR(existingBlock['mode']):
         true_new_path += '/'+oldname[1:]
         rename_syscall(old,true_new_path,True)
         didRecursion = True
         pass
 
       #handle case when there is already a file @ true_new_path (free its blocks)
-      else: removeFile(n,b)
+      else: freeFile(existingInode, existingBlock)
 
     if not didRecursion:
       #moving to blank spot
