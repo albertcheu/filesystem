@@ -358,8 +358,7 @@ def findNextFree():
     if len(freeblocklist[i]) > 0:
       #take smallest element from the list (guaranteed to be first)
       blockNum = freeblocklist[i][0]
-      #warning("Next free block is "+str(blockNum))
-      del freeblocklist[i][0:1]
+      del freeblocklist[i][0]
       #save change to f.b.l
       persist(freeblocklist[i], i+STARTFREE)
       #return the number
@@ -624,10 +623,6 @@ def mkdir_syscall(path, mode):
     parentBlock['filename_to_inode_dict'][dirname] = newinode
     parentBlock['linkcount'] += 1
 
-    #persist metadata changes
-    #persist(parentBlock, parentinode)
-    #persist(blocks[newinode-ROOTINODE],newinode)
-
     # finally, update the path2inode and return success!!!
     path2inode[truepath] = newinode    
     return 0
@@ -752,9 +747,6 @@ def link_syscall(oldpath, newpath):
     newParentBlock['linkcount'] += 1
     # ... and the file itself
     oldBlock['linkcount'] += 1
-
-    #persist(oldBlock, oldinode)
-    #persist(newParentBlock, newparentinode)
 
     # finally, update the path2inode and return success!!!
     path2inode[truenewpath] = oldinode    
@@ -965,7 +957,6 @@ def open_syscall(path, flags, mode):
       raise SyscallError("open_syscall","ENOENT","The file does not exist.")
 
     truepath = _get_absolute_path(path)
-    #made = False
 
     # is the file missing?
     if truepath not in path2inode:
@@ -1835,8 +1826,6 @@ def mknod_syscall(path, mode, dev):
   inode = filedescriptortable[fd]['inode']
   block = findBlock(inode)
   block['rdev'] = dev
-  #warning("persisting "+str(inode))
-  #persist(block,inode)
  
   # close the file descriptor... 
   close_syscall(fd)
@@ -2025,7 +2014,7 @@ def renameHelper(dirBlock, oldPrefix, newPrefix):
       del path2inode[oldChildPath]
       path2inode[newChildPath] = inode
       childBlock = findBlock(inode)
-      if IS_DIR(childBlock['mode']): renameHelper(childBlock, oldChildPath, newChildPath)
+      if childName.startswith('d'): renameHelper(childBlock, oldChildPath, newChildPath)
       pass
     pass
   pass
@@ -2084,13 +2073,17 @@ def rename_syscall(old, new, calledFromSelf=False):
       newparentinode = path2inode[trueparentpath_new]
       newparentBlock = findBlock(newparentinode)
 
-      newparentBlock['filename_to_inode_dict'][newname] = inode
       del oldparentBlock['filename_to_inode_dict'][oldname]
-      
+      oldparentBlock['linkcount'] -= 1
+
+      newparentBlock['filename_to_inode_dict'][newname] = inode
+      newparentBlock['linkcount'] += 1
+
       #all keys in path2inode starting with true_old_path are changed to start with true_new_path
       if IS_DIR(block['mode']): renameHelper(block, true_old_path, true_new_path)
 
   finally:
     if not calledFromSelf: theLock.release()
     pass
+
   return 0

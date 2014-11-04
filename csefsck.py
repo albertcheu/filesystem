@@ -8,6 +8,9 @@ PREFIX = 'linddata.'
 DEVID = 20
 NOW = 1523630836
 BLOCKSIZE = 4096
+NUMACCESSIBLE = 9974# 10000 - 26
+STARTFREE,ENDFREE = 1,25
+ROOTINODE = 26
 
 include serialize.py
 
@@ -36,14 +39,14 @@ def getMetadata(blockNum):
     return ans
 
 def prelimCheck(blockNums):
+    print 'Running preliminary checks...'
 
-    #every file system has superblock, free block list, and root inode
-    if len(blockNums) < 27:
+    if len(blockNums) < ROOTINODE+1:
         print 'There is no filesystem here'
         return False
     blockNums.sort()
 
-    for i in range(27):
+    for i in range(ROOTINODE+1):
         #27 files must go from 0 to 26
         if i != blockNums[i]:
             print 'Missing block no.', i
@@ -66,7 +69,7 @@ def prelimCheck(blockNums):
                 return False
             pass
 
-        elif i > 0 and i < 26:
+        elif i > 0 and i < ROOTINODE:
             if not isinstance(block, list):
                 print "Each entry of the free block list must be of type 'list'"
                 return False
@@ -75,21 +78,43 @@ def prelimCheck(blockNums):
         pass
 
     #This looks okay.
+    print 'Initial metadata look okay'
     return True
 
 def checkFree(usedBlocks):
-    #free block = unreachable from root (and not in 0-25)
-    #used block = reachable from root
-    #we just compare usedBlocks to the info of the f.b.l (no overlap!)
+    print 'Checking if used blocks complement free blocks...'
+
     freeBlocks = set()
-    for i in (1,26):
+    for i in range(STARTFREE,ENDFREE+1):
         fbl = getMetadata(i)
         for blockNum in fbl: freeBlocks.add(blockNum)
         pass
-    return len(usedBlocks & freeBlocks) == 0
+
+    #The free block list must not have anything that is used
+    ntrsct = usedBlocks & freeBlocks 
+    a = len(ntrsct) == 0
+    #The list must also contain everything unused
+    nn = usedBlocks | freeBlocks
+    b = len(nn) == NUMACCESSIBLE
+
+    ans = a and b
+
+    if ans: print 'Yes they do'
+    else:
+        if not a:
+            print 'The free block list contains at least one used block'
+            print ntrsct
+            pass
+        if not b:
+            print 'The free block list is incomplete'
+            print len(nn)
+            pass
+        pass
+
+    return ans
 
 def traverse():
-    #Go thru the file system
+    print 'Going through the file-system tree...'
     
     def checkDir(parentNum, thisNum, curPath, usedBlocks):
         print curPath
@@ -129,10 +154,10 @@ def traverse():
         ans = True
         for child in children:
             if child[0]=='d' and child not in ('d.','d..'):
-                ans = ans and checkDir(thisNum, children[child], curPath+child+'/', usedBlocks)
+                ans = ans and checkDir(thisNum, children[child], curPath+child[1:]+'/', usedBlocks)
                 pass
             elif child[0]=='f':
-                ans = ans and checkFile(children[child], curPath+child, usedBlocks)
+                ans = ans and checkFile(children[child], curPath+child[1:], usedBlocks)
                 pass
             pass
         return ans
@@ -164,7 +189,7 @@ def traverse():
             ans = True
             for otherNum in index:
                 #Do the files exist for these blocks?
-                try: open(PREFIX+str(otherNum))
+                try: open(PREFIX+str(otherNum)).close()
                 except IOError as e:
                     ans = False
                     print 'Block', otherNum, 'has no associated file'
@@ -200,7 +225,7 @@ def traverse():
         return False #should never reach this!
 
     usedBlocks = set()
-    b = checkDir(26,26,'/',usedBlocks)
+    b = checkDir(ROOTINODE,ROOTINODE,'/',usedBlocks)
     return b, usedBlocks
 
 if callfunc == 'initialize':
