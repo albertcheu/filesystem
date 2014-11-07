@@ -2,15 +2,14 @@
 #file system checker
 
 #PRECONDITION: The blocks are in the same dir as this file
-#PRECONDITION: We assume serialize.py (by Cappos) is in same dir as this file
+#PRECONDITION: We assume you can include serialize.py (by Cappos) via repypp.py
 
 PREFIX = 'linddata.'
 DEVID = 20
 NOW = 1523630836
 BLOCKSIZE = 4096
 NUMACCESSIBLE = 9974# 10000 - 26
-STARTFREE,ENDFREE = 1,25
-ROOTINODE = 26
+CONSTS = {'root':-1,'freeStart':-1,'freeEnd':-1}
 
 include serialize.py
 
@@ -20,60 +19,64 @@ def getMetadata(blockNum):
     datastring = datafo.readline().strip()
     datafo.close()
     ans = deserializedata(datastring)
-    #throw ValueError if not in right format
+
+    #throw ValueError if not in right format, return otherwise
+
     if isinstance(ans, dict):
-        #inode or superblock
+        #inode needs size field, superblock needs dev_id
         if 'size' not in ans and 'dev_id' not in ans:
             raise ValueError
             pass
-        pass
+        return ans
 
     if isinstance(ans, list):
         #index or f.b.l have only numbers
         for num in ans:
             if not isinstance(num, int): raise ValueError
             pass
-        pass
+        return ans
 
-    if isinstance(ans, str): raise ValueError
-    return ans
+    raise ValueError
+    
 
 def prelimCheck(blockNums):
     print 'Running preliminary checks...'
 
-    if len(blockNums) < ROOTINODE+1:
+    if len(blockNums) == 0 or blockNums[0] != 0:
         print 'There is no filesystem here'
         return False
-    blockNums.sort()
 
-    for i in range(ROOTINODE+1):
-        #27 files must go from 0 to 26
+    try:
+        superblock = getMetadata(0)
+    except:
+        print 'Cannot deserialize superblock'
+        return False
+    CONSTS['root'] = superblock['root']
+    CONSTS['freeStart'] = superblock['freeStart']
+    CONSTS['freeEnd'] = superblock['freeEnd']
+
+    if superblock['creationTime'] >= NOW:
+        print 'Superblock has an invalid creation time'
+        return False
+    elif superblock['dev_id'] != DEVID:
+        print 'Superblock has an invalid device ID'
+        return False
+    
+    for i in range(CONSTS['freeStart'],CONSTS['freeEnd']+1):
+        #27 files must go from 0 to 26, no gaps/skips
         if i != blockNums[i]:
             print 'Missing block no.', i
             return False
 
         #Must be able to deserialize each file
-
         try: block = getMetadata(i)
         except:
             print 'Cannot deserialize block no.', i
             return False
-            
-        #Superblock must be okay (time and device id)
-        if i == 0:
-            if block['creationTime'] >= NOW:
-                print 'Superblock has an invalid creation time'
-                return False
-            elif block['dev_id'] != DEVID:
-                print 'Superblock has an invalid device ID'
-                return False
-            pass
 
-        elif i > 0 and i < ROOTINODE:
-            if not isinstance(block, list):
-                print "Each entry of the free block list must be of type 'list'"
-                return False
-            pass
+        if not isinstance(block, list):
+            print "Each entry of the free block list must be of type 'list'"
+            return False
 
         pass
 
@@ -85,7 +88,7 @@ def checkFree(usedBlocks):
     print 'Checking if used blocks complement free blocks...'
 
     freeBlocks = set()
-    for i in range(STARTFREE,ENDFREE+1):
+    for i in range(CONSTS['freeStart'],CONSTS['freeEnd']+1):
         fbl = getMetadata(i)
         for blockNum in fbl: freeBlocks.add(blockNum)
         pass
@@ -107,7 +110,7 @@ def checkFree(usedBlocks):
             pass
         if not b:
             print 'The free block list is incomplete'
-            print len(nn)
+            print 'Combined with used blocks, we are only keeping track of %d blocks' % len(nn)
             pass
         pass
 
@@ -225,19 +228,24 @@ def traverse():
         return False #should never reach this!
 
     usedBlocks = set()
-    b = checkDir(ROOTINODE,ROOTINODE,'/',usedBlocks)
+    b = checkDir(CONSTS['root'],CONSTS['root'],'/',usedBlocks)
     return b, usedBlocks
 
 if callfunc == 'initialize':
     entries,blockNums = listdir(), []
+
     for e in entries:
         if e.startswith(PREFIX): blockNums.append(int(e[len(PREFIX):]))
         pass
+    blockNums.sort()
+
     ok1 = prelimCheck(blockNums)
+
     if ok1:
         ok2,usedBlocks = traverse()
         if ok2: ok3 = checkFree(usedBlocks)
         pass
+
     if ok1 and ok2 and ok3:
         print "The file system is alright! Have a nice day, good sir or ma'am"
         pass

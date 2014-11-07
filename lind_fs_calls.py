@@ -53,8 +53,7 @@ fileobjecttable = {}
 # without using global, which is blocked by RepyV2
 currentDir = {'value':'/'}
 
-#I want to see the errors!
-SILENT=False
+SILENT=True#False
 
 def warning(*msg):
   if not SILENT:
@@ -77,7 +76,7 @@ def persist(block, blockNum):
   pass
 
 #This function is called by lind_fuse.py at simulation's end
-#as the name suggest, only metadata is saved; actual user data
+#as the name suggests, only metadata is saved; actual user data
 #is saved by open/read/write/trunc syscalls
 def persist_metadata(who_needs_this_arg_question_mark):
   def persistNode(blockNum):
@@ -1181,6 +1180,7 @@ def read_syscall(fd, count):
       raise SyscallError("read_syscall","EINVAL","File descriptor does not refer to a regular file.")
       pass
       
+    block['atime'] = NEW_TIME
     position = filedescriptortable[fd]['position']
 
     #If the block is direct, just do a simple read of the bytes
@@ -1292,6 +1292,8 @@ def write_syscall(fd, data):
 
     # update the file size if we've extended it
     block['size'] = max(block['size'],filedescriptortable[fd]['position'])
+    
+    block['mtime'] = NEW_TIME
 
     # we always write it all, so just return the length of what we were passed.
     # We do not mention whether we write blank data (if position is after the 
