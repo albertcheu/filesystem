@@ -206,7 +206,7 @@ def _blank_fs_init():
   #superblock
   superblock['creationTime'] = DEFAULT_TIME
   superblock['mount'] = 0
-  superblock['dev_id'] = DEVID
+  superblock['devId'] = DEVID
   superblock['root'] = ROOTINODE
   superblock['freeStart'] = STARTFREE
   superblock['freeEnd'] = ENDFREE
@@ -475,7 +475,7 @@ def _istatfs_helper(inode):
   # free file nodes...   I think this is also infinite...
   myfsdata['f_files'] = 1024*1024*512
 
-  myfsdata['f_fsid'] = superblock['dev_id']
+  myfsdata['f_fsid'] = superblock['devId']
 
   # we don't really have a limit, but let's say 254
   myfsdata['f_namelen'] = 254
@@ -877,7 +877,7 @@ def fstat_syscall(fd):
      filedescriptortable[fd] is filedescriptortable[1] or \
      filedescriptortable[fd] is filedescriptortable[2] \
     ):
-    return (superblock['dev_id'],          # st_dev
+    return (superblock['devId'],          # st_dev
           inode,                                 # inode
             49590, #mode
           1,  # links
@@ -902,7 +902,7 @@ def fstat_syscall(fd):
 def _istat_helper(inode):
   block = findBlock(inode)
 
-  ret =  (superblock['dev_id'],          # st_dev
+  ret =  (superblock['devId'],          # st_dev
           inode,                                 # inode
           block['mode'],
           block['linkcount'],

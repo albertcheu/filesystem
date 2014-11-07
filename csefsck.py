@@ -8,8 +8,7 @@ PREFIX = 'linddata.'
 DEVID = 20
 NOW = 1523630836
 BLOCKSIZE = 4096
-NUMACCESSIBLE = 9974# 10000 - 26
-CONSTS = {'root':-1,'freeStart':-1,'freeEnd':-1}
+CONSTS = {'root':-1,'freeStart':-1,'freeEnd':-1,'numaccessible':-1}
 
 include serialize.py
 
@@ -23,8 +22,8 @@ def getMetadata(blockNum):
     #throw ValueError if not in right format, return otherwise
 
     if isinstance(ans, dict):
-        #inode needs size field, superblock needs dev_id
-        if 'size' not in ans and 'dev_id' not in ans:
+        #inode needs size field, superblock needs devId
+        if 'size' not in ans and 'devId' not in ans:
             raise ValueError
             pass
         return ans
@@ -54,11 +53,15 @@ def prelimCheck(blockNums):
     CONSTS['root'] = superblock['root']
     CONSTS['freeStart'] = superblock['freeStart']
     CONSTS['freeEnd'] = superblock['freeEnd']
+    #10,000 - superblock = 9,999
+    CONSTS['numaccessible'] = superblock['maxBlocks'] - 1
+    #9,999 - 25 (from free block list)
+    CONSTS['numaccessible'] -= (CONSTS['freeEnd']-CONSTS['freeStart']+1)
 
     if superblock['creationTime'] >= NOW:
         print 'Superblock has an invalid creation time'
         return False
-    elif superblock['dev_id'] != DEVID:
+    elif superblock['devId'] != DEVID:
         print 'Superblock has an invalid device ID'
         return False
     
@@ -98,7 +101,7 @@ def checkFree(usedBlocks):
     a = len(ntrsct) == 0
     #The list must also contain everything unused
     nn = usedBlocks | freeBlocks
-    b = len(nn) == NUMACCESSIBLE
+    b = len(nn) == CONSTS['numaccessible']
 
     ans = a and b
 
@@ -110,7 +113,7 @@ def checkFree(usedBlocks):
             pass
         if not b:
             print 'The free block list is incomplete'
-            print 'Combined with used blocks, we are only keeping track of %d blocks' % len(nn)
+            print 'Used+Free should be %d blocks but currently have %d' % (CONSTS['numaccessible'],len(nn))
             pass
         pass
 
