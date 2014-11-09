@@ -5,11 +5,9 @@
 
   Start Date: December 17th, 2011
 
-  Modified by Albert Cheu, for homework
+  Heavily modified by Albert Cheu, for homework
 
-  DO NOT COPY THE CODE!!! That's called plagiarism, kids.
-  But I suppose the comments are up for grabs; the code itself is my property
-  10/11/14 - 10/30/14
+  10/11/14 - 11/09/14
 """
 BLOCKSIZE = 4096
 MAXBLOCKS = 10000
@@ -22,19 +20,12 @@ PREFIX = 'linddata.'
 #used for free block list and index blocks
 NUMNUM = 400
 
-#Block 0
-superblock = {}
-SUPERBLOCKFNAME = PREFIX+'0'
-
-#Blocks 1-25
+blocks = []
+SUPERBLOCKNUM = 0
+SUPERBLOCKFNAME = PREFIX+str(SUPERBLOCKNUM)
 STARTFREE, ENDFREE = 1,25
-freeblocklist = []
-
-#Blocks 26-9999
 ROOTINODE = 26
-rootblock = {}
 ROOTBLOCKFNAME = PREFIX+str(ROOTINODE)
-blocks = [rootblock]
 
 # A lock that prevents inconsistencies
 theLock = createlock()
@@ -53,7 +44,8 @@ fileobjecttable = {}
 # without using global, which is blocked by RepyV2
 currentDir = {'value':'/'}
 
-SILENT=True#False
+#SILENT=False
+SILENT=True
 
 def warning(*msg):
   if not SILENT:
@@ -80,7 +72,7 @@ def persist(block, blockNum):
 #is saved by open/read/write/trunc syscalls
 def persist_metadata(who_needs_this_arg_question_mark):
   def persistNode(blockNum):
-    block = findBlock(blockNum)
+    block = blocks[blockNum]
     persist(block, blockNum)
 
     #If i am a file's inode...
@@ -88,7 +80,7 @@ def persist_metadata(who_needs_this_arg_question_mark):
       #if i am indirect, save the index block too!
       if block['indirect']:
         secondary = block['location']
-        indexBlock = findBlock(secondary)
+        indexBlock = blocks[secondary]
         persist(indexBlock, secondary)
         pass
       #If i am a direct file inode, do nothing else!
@@ -96,19 +88,19 @@ def persist_metadata(who_needs_this_arg_question_mark):
 
     #if i am a directory, recurse!
     else:
-      ftid = block['filename_to_inode_dict']
-      for filename in ftid:
-        if filename not in ('d..','d.'):
-          child = ftid[filename]
-          persistNode(child)
-          pass
+      children = block['filename_to_inode_dict']
+      for child in children:
+        if child not in ('d..','d.'): persistNode(children[child])
         pass
       pass
 
     return 0
 
   #superblock & free block list
-  for i in range(ENDFREE+1): persist(findBlock(i),i)
+  #for i in range(ENDFREE+1): persist(findBlock(i),i)
+  persist(blocks[SUPERBLOCKNUM],SUPERBLOCKNUM)
+  for i in range(STARTFREE,ENDFREE+1): persist(blocks[i],i)
+
   #inodes, starting from root
   persistNode(ROOTINODE)
   return 0
@@ -150,12 +142,9 @@ def load_fs(name=SUPERBLOCKFNAME):
     load_fs_special_files()
   else:
     f.close()
-
     #load the blocks!
     restore()
-
-    superblock["mount"] += 1
-
+    blocks[SUPERBLOCKNUM]["mount"] += 1
     # I need to rebuild the path2inode table. let's do this!
     _rebuild_path2inode()
     pass
@@ -204,6 +193,7 @@ def _blank_fs_init():
   # Now setup blank data structures
 
   #superblock
+  superblock = findBlock(SUPERBLOCKNUM)
   superblock['creationTime'] = DEFAULT_TIME
   superblock['mount'] = 0
   superblock['devId'] = DEVID
@@ -211,9 +201,10 @@ def _blank_fs_init():
   superblock['freeStart'] = STARTFREE
   superblock['freeEnd'] = ENDFREE
   superblock['maxBlocks'] = MAXBLOCKS
-  persist(superblock,0)
+  persist(superblock,SUPERBLOCKNUM)
 
   #root block
+  rootblock = findBlock(ROOTINODE)
   rootblock['size'] = 0
   rootblock['uid'] = DEFAULT_UID
   rootblock['gid'] = DEFAULT_GID
@@ -230,16 +221,18 @@ def _blank_fs_init():
   #start right after root (means 27), end just before 400 (means 399)
   currentBlock,nextToHit = ROOTINODE+1,NUMNUM
 
-  for i in range(ENDFREE - STARTFREE + 1):
+  for i in range(STARTFREE, ENDFREE+1):
     x = []
-    for j in range(currentBlock,nextToHit,1):
+    for j in range(currentBlock,nextToHit):
       x.append(j)
       currentBlock += 1
       pass
 
-    #second contains 400 to 799, etc.
+    #second listing contains 400 to 799, etc.
     nextToHit += NUMNUM
-    freeblocklist.append(x)
+
+    findBlock(i)#ensures the array 'blocks' is big enough
+    blocks[i] = x
 
     #persist this block
     persist(x,i+1)
@@ -273,8 +266,10 @@ def findBlockDetailed(blockNum):
 
   return block, targetArray, index
 
-#Just gimme the dictionary
-def findBlock(blockNum): return findBlockDetailed(blockNum)[0]
+def findBlock(blockNum):
+  while len(blocks) <= blockNum: blocks.append({})
+  return blocks[blockNum]
+  #return findBlockDetailed(blockNum)[0]
 
 def restore():
 
@@ -284,28 +279,17 @@ def restore():
     datastring = datafo.readat(None, 0)
     datafo.close()
     # get what we stored
-    data = deserializedata(datastring)
+    block = deserializedata(datastring)
 
     #Get blank dictionary (grow the list of blocks if necessary)
-    block, targetArray, index = findBlockDetailed(blockNum)
+    existing = findBlock(blockNum)
+
     # should only be called with a fresh system...
-    assert(block == {})
+    assert(existing == {})
+    blocks[blockNum] = block
 
-    if blockNum in (0, ROOTINODE):
-      # I need to put things in the dict, but it's not a global...   so instead
-      # add them one at a time.   It should be empty to start with
-      for item in data: block[item] = data[item]
-      pass
-    else: targetArray[index] = data
-
-    #We are done if it is superblock or elem. of free block list
-    if blockNum < ROOTINODE: return
-
-    #If actually part of file system, recurse (maybe)
-    block = targetArray[index]
-
-    #file's index block -> do nothing else
-    if isinstance(block, list): return
+    #We are done if it is superblock or list of numbers (index or free-block-list)
+    if blockNum == SUPERBLOCKNUM or isinstance(block, list): return
 
     #This is a dir -> restore its children
     if 'filename_to_inode_dict' in block:
@@ -321,13 +305,16 @@ def restore():
 
     return
 
-  for i in range(ROOTINODE+1):
-    restore_single(i)
+  restore_single(SUPERBLOCKNUM)
+  for i in range(STARTFREE,ENDFREE+1): restore_single(i)
+  restore_single(ROOTINODE)
+
+  pass
 
 #path is already added.
 def _rebuild_path2inode_helper(path, inode):
   # for each entry in my table...
-  for entryname,entryinode in blocks[inode-ROOTINODE]['filename_to_inode_dict'].iteritems():
+  for entryname,entryinode in blocks[inode]['filename_to_inode_dict'].iteritems():
     if entryname in ('d.','d..'): continue
 
     # always add it... (clip off first character of entryname)
@@ -353,13 +340,13 @@ def _rebuild_path2inode():
 
 #Find the (number of) next free block
 def findNextFree():
-  for i in range(ENDFREE-STARTFREE+1):
-    if len(freeblocklist[i]) > 0:
+  for i in range(STARTFREE,ENDFREE+1):
+    if len(blocks[i]) > 0:
       #take smallest element from the list (guaranteed to be first)
-      blockNum = freeblocklist[i][0]
-      del freeblocklist[i][0]
+      blockNum = blocks[i][0]
+      del blocks[i][0]
       #save change to f.b.l
-      persist(freeblocklist[i], i+STARTFREE)
+      persist(blocks[i], i)
       #return the number
       return blockNum
     pass
@@ -369,12 +356,12 @@ def findNextFree():
 def allocate():
   #Create the dictionary for the block if necessary
   blockNum = findNextFree()
-  while blockNum-ROOTINODE >= len(blocks): blocks.append({})
+  while blockNum >= len(blocks): blocks.append({})
   return blockNum
 
 def freeBlock(blockNum):
   #free up the piece of memory that has this number
-  x = freeblocklist[blockNum/NUMNUM] #27-399 are in 0, 400-799 are in 1, etc.
+  x = blocks[STARTFREE+blockNum/NUMNUM] #27-399 are in 1, 400-799 are in 2, etc.
   #Add to the list of free blocks
   #runs in linear time... would be better if tree/heap were used
   #but we cant use modules (like Queue), which sucks
@@ -475,7 +462,7 @@ def _istatfs_helper(inode):
   # free file nodes...   I think this is also infinite...
   myfsdata['f_files'] = 1024*1024*512
 
-  myfsdata['f_fsid'] = superblock['devId']
+  myfsdata['f_fsid'] = blocks[SUPERBLOCKNUM]['devId']
 
   # we don't really have a limit, but let's say 254
   myfsdata['f_namelen'] = 254
@@ -618,7 +605,7 @@ def mkdir_syscall(path, mode):
             'atime':NEW_TIME, 'ctime':NEW_TIME, 'mtime':NEW_TIME,
             'linkcount':2,    # the number of dir entries...
             'filename_to_inode_dict': {'d.':newinode, 'd..':parentinode}}
-    blocks[newinode-ROOTINODE] = newinodeentry
+    blocks[newinode] = newinodeentry
     parentBlock['filename_to_inode_dict'][dirname] = newinode
     parentBlock['linkcount'] += 1
 
@@ -676,9 +663,6 @@ def rmdir_syscall(path):
 
     #mark as free
     freeBlock(thisinode)
-
-    #persist(parentBlock, parentinode)
-    #Don't persist thisinode, since the content hasn't changed
 
     # finally, clean up the path2inode and return success!!!
     del path2inode[truepath]
@@ -756,6 +740,7 @@ def link_syscall(oldpath, newpath):
 ##### UNLINK  #####
 
 def freeFile(blockNum, block):
+  #Given a file's inode and its number, free the blocks
   if block['indirect']:
 
     indexBlockNum = block['location']
@@ -787,14 +772,13 @@ def unlink_syscall(path):
       raise SyscallError("unlink_syscall","ENOENT","The path does not exist.")
       
     thisinode = path2inode[truepath]
+    thisBlock = findBlock(thisinode)
     
     # okay, is it a directory?
-    if IS_DIR(findBlock(thisinode)['mode']):
+    if IS_DIR(thisBlock['mode']):
       raise SyscallError("unlink_syscall","EISDIR","Path is a directory.")
 
     # TODO: I should check permissions...
-
-    thisBlock = findBlock(thisinode)
     trueparentpath = _get_absolute_parent_path(path)
     parentinode = path2inode[trueparentpath]
     parentBlock = findBlock(parentinode)
@@ -877,7 +861,7 @@ def fstat_syscall(fd):
      filedescriptortable[fd] is filedescriptortable[1] or \
      filedescriptortable[fd] is filedescriptortable[2] \
     ):
-    return (superblock['devId'],          # st_dev
+    return (blocks[SUPERBLOCKNUM]['devId'],          # st_dev
           inode,                                 # inode
             49590, #mode
           1,  # links
@@ -902,7 +886,7 @@ def fstat_syscall(fd):
 def _istat_helper(inode):
   block = findBlock(inode)
 
-  ret =  (superblock['devId'],          # st_dev
+  ret =  (blocks[SUPERBLOCKNUM]['devId'],          # st_dev
           inode,                                 # inode
           block['mode'],
           block['linkcount'],
@@ -932,11 +916,15 @@ def get_next_fd():
   raise SyscallError("open_syscall","EMFILE","The maximum number of files are open.")
 
 def makeFileObject(blockNum):
+  #Given the number of a block that contains a file's data,
+  #create repy file object for that block (to hold piece of the data)
+
   # if it exists, close the existing file object so I can remove it...
   if blockNum in fileobjecttable: fileobjecttable[blockNum].close()
   # remove the file...
   try: removefile(PREFIX+str(blockNum))
   except: pass
+
   # always open the file.
   fileobjecttable[blockNum] = openfile(PREFIX+str(blockNum),True)
   fileobjecttable[blockNum].writeat('\0'*BLOCKSIZE,0)
@@ -996,7 +984,7 @@ def open_syscall(path, flags, mode):
                        'linkcount':1}
 
       # ... and put it in the table..
-      blocks[newinode-ROOTINODE] = newinodeentry
+      blocks[newinode] = newinodeentry
       
       # let's make the parent point to it...
       parentBlock = findBlock(parentinode)
@@ -1007,11 +995,12 @@ def open_syscall(path, flags, mode):
       # finally, update the path2inode
       path2inode[truepath] = newinode
 
+      #initially assume we can fit data into one block, growing when necessary
       # this file must not exist or it's an internal error!!!
       makeFileObject(secondaryInode)
       
-      persist(parentBlock,parentinode)
-      persist(newinodeentry, newinode)
+      #persist(parentBlock,parentinode)
+      #persist(newinodeentry, newinode)
 
     # if the file did exist...
     else:
@@ -1099,7 +1088,7 @@ def lseek_syscall(fd, offset, whence):
     raise SyscallError("lseek_syscall","EBADF","Invalid file descriptor.")
 
   # if we are any of the lower handles(stderr, sockets), cant seek, just report 0
-  if filedescriptortable[fd]['inode'] in [0,1,2]: return 0
+  if filedescriptortable[fd]['inode'] in (0,1,2): return 0
 
   # Acquire the fd lock...
   filedescriptortable[fd]['lock'].acquire(True)
@@ -1195,7 +1184,7 @@ def read_syscall(fd, count):
 
       #find which block to start from and the position within that block
       startIndex,modPosition = position / BLOCKSIZE, position % BLOCKSIZE
-      blockNumbers = findBlock(block['location'])#a list of numbers
+      blockNumbers = findBlock(block['location'])#index block = a list of numbers
 
       for blockNum in blockNumbers[startIndex:]:
         #bytes left in this block
@@ -1373,7 +1362,7 @@ def _close_helper(fd):
   # now let's close it and remove it from the table
   elif block['indirect']:
     indexLoc = block['location']
-    index = blocks[indexLoc-ROOTINODE]
+    index = blocks[indexLoc]
     for blockNum in index:
       fileobjecttable[blockNum].close()
       del fileobjecttable[blockNum]
@@ -1671,7 +1660,7 @@ def truncate_syscall(path, length):
   block = findBlock(inode)
   secondaryInode = block['location']
   if block['indirect']: secondaryInode = findBlock(secondaryInode)[0]
-  if secondaryInode  not in fileobjecttable:
+  if secondaryInode not in fileobjecttable:
     fd = open_syscall(path, O_RDWR, S_IRWXA)
     ret = ftruncate_syscall(fd, length)
     close_syscall(fd)
@@ -1737,12 +1726,12 @@ def ftruncate_syscall(fd, newsize,calledFromWrite=False):
           oldLoc = block['location']
           indexLoc = allocate()#where the index block will be
           block['location'] = indexLoc
-          blocks[indexLoc-ROOTINODE] = [oldLoc]#index = list of numbers
+          blocks[indexLoc] = [oldLoc]#index = list of numbers
           pass
 
         #Add needed blocks
         indexLoc = block['location']
-        index = blocks[indexLoc-ROOTINODE]
+        index = blocks[indexLoc]
         while len(index) < neededBlocks:
           index.append(allocate())
           makeFileObject(index[-1])#pre-filled with zeroes
@@ -2013,8 +2002,10 @@ def renameHelper(dirBlock, oldPrefix, newPrefix):
     if childName not in ('d.','d..'):
       inode = children[childName]
       oldChildPath, newChildPath = oldPrefix+'/'+childName[1:], newPrefix+'/'+childName[1:]
+
       del path2inode[oldChildPath]
       path2inode[newChildPath] = inode
+
       childBlock = findBlock(inode)
       if childName.startswith('d'): renameHelper(childBlock, oldChildPath, newChildPath)
       pass
