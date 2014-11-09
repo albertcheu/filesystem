@@ -97,7 +97,6 @@ def persist_metadata(who_needs_this_arg_question_mark):
     return 0
 
   #superblock & free block list
-  #for i in range(ENDFREE+1): persist(findBlock(i),i)
   persist(blocks[SUPERBLOCKNUM],SUPERBLOCKNUM)
   for i in range(STARTFREE,ENDFREE+1): persist(blocks[i],i)
 
@@ -239,37 +238,9 @@ def _blank_fs_init():
     pass    
   pass
 
-def findBlockDetailed(blockNum):
-  #return the block, the array it is in (if any), and its index in that array
-
-  #the superblock is not in any array
-  if blockNum == 0: block, targetArray, index = superblock, None, None
-
-  #the root inode/dir is in the blocks array, at the first spot
-  elif blockNum == ROOTINODE: block, targetArray, index = rootblock, blocks, 0
-
-  else:
-    #Free block list
-    if blockNum >= STARTFREE and blockNum <= ENDFREE:      
-      targetArray, offset = freeblocklist, 1
-      pass
-
-    #Plain old block
-    else: targetArray, offset = blocks, ROOTINODE
-
-    #add to array if it isn't as big as we need
-    #only happens when restore() is called, so no need to persist    
-    index = blockNum - offset
-    while len(targetArray) <= index: targetArray.append({})
-    block = targetArray[index]
-    pass
-
-  return block, targetArray, index
-
 def findBlock(blockNum):
   while len(blocks) <= blockNum: blocks.append({})
   return blocks[blockNum]
-  #return findBlockDetailed(blockNum)[0]
 
 def restore():
 
@@ -534,8 +505,7 @@ def access_syscall(path, amode):
     # BUG: This should take the UID / GID of the requestor in mind
 
     # if all of the bits for this file are set as requested, then success
-    #if superblock['inodetable'][thisinode]['mode'] & amode == amode:
-    if findBlock(inode)['mode'] & amode == amode:  return 0
+    if blocks[inode]['mode'] & amode == amode:  return 0
 
     raise SyscallError("access_syscall","EACESS","The requested access is denied.")
 
@@ -587,7 +557,7 @@ def mkdir_syscall(path, mode):
       raise SyscallError("mkdir_syscall","ENOENT","Parent path does not exist.")
 
     parentinode = path2inode[trueparentpath]
-    parentBlock = findBlock(parentinode)
+    parentBlock = blocks[parentinode]
 
     if not IS_DIR(parentBlock['mode']):
       raise SyscallError("mkdir_syscall","ENOTDIR","Path's parent is not a directory.")
@@ -640,17 +610,17 @@ def rmdir_syscall(path):
     thisinode = path2inode[truepath]
     
     # okay, is it a directory?
-    if not IS_DIR(findBlock(thisinode)['mode']):
+    if not IS_DIR(blocks[thisinode]['mode']):
       raise SyscallError("rmdir_syscall","ENOTDIR","Path is not a directory.")
 
     # Is it empty?
-    if findBlock(thisinode)['linkcount'] > 2:
+    if blocks[thisinode]['linkcount'] > 2:
       raise SyscallError("rmdir_syscall","ENOTEMPTY","Path is not empty.")
 
     # TODO: I should check permissions...
     trueparentpath = _get_absolute_parent_path(path)
     parentinode = path2inode[trueparentpath]
-    parentBlock = findBlock(parentinode)
+    parentBlock = blocks[parentinode]
 
     # We're ready to go!   Let's clean up the file entry
     dirname = 'd'+truepath.split('/')[-1]
@@ -691,7 +661,7 @@ def link_syscall(oldpath, newpath):
 
     oldinode = path2inode[trueoldpath]
     # is oldpath a directory?
-    if IS_DIR(findBlock(oldinode)['mode']):
+    if IS_DIR(blocks[oldinode]['mode']):
       raise SyscallError("link_syscall","EPERM","Old path is a directory.")
   
     # TODO: I should check permissions...
@@ -713,7 +683,7 @@ def link_syscall(oldpath, newpath):
       raise SyscallError("link_syscall","ENOENT","New path's parent does not exist.")
 
     newparentinode = path2inode[truenewparentpath]
-    if not IS_DIR(findBlock(newparentinode)['mode']):
+    if not IS_DIR(blocks[newparentinode]['mode']):
       raise SyscallError("link_syscall","ENOTDIR","New path's parent is not a directory.")
 
 
@@ -721,7 +691,7 @@ def link_syscall(oldpath, newpath):
 
     # okay, great!!!   We're ready to go!   Let's make the file...
     newfilename = 'f'+truenewpath.split('/')[-1]
-    oldBlock, newParentBlock = findBlock(oldinode), findBlock(newparentinode)
+    oldBlock, newParentBlock = blocks[oldinode], blocks[newparentinode]
 
     # first, make the directory entry...
     newParentBlock['filename_to_inode_dict'][newfilename] = oldinode
@@ -744,7 +714,7 @@ def freeFile(blockNum, block):
   if block['indirect']:
 
     indexBlockNum = block['location']
-    index = findBlock(indexBlockNum)
+    index = blocks[indexBlockNum]
 
     for bN in index: freeBlock(bN)
     freeBlock(indexBlockNum)
@@ -772,7 +742,7 @@ def unlink_syscall(path):
       raise SyscallError("unlink_syscall","ENOENT","The path does not exist.")
       
     thisinode = path2inode[truepath]
-    thisBlock = findBlock(thisinode)
+    thisBlock = blocks[thisinode]
     
     # okay, is it a directory?
     if IS_DIR(thisBlock['mode']):
@@ -781,7 +751,7 @@ def unlink_syscall(path):
     # TODO: I should check permissions...
     trueparentpath = _get_absolute_parent_path(path)
     parentinode = path2inode[trueparentpath]
-    parentBlock = findBlock(parentinode)
+    parentBlock = blocks[parentinode]
 
     # We're ready to go!   Let's clean up the file entry
     fname = 'f'+truepath.split('/')[-1]
@@ -832,7 +802,7 @@ def stat_syscall(path):
     thisinode = path2inode[truepath]
     
     # If its a character file, call the helper function.
-    if IS_CHR(findBlock(thisinode)['mode']):
+    if IS_CHR(blocks[thisinode]['mode']):
       return _istat_helper_chr_file(thisinode)
    
     return _istat_helper(thisinode)
@@ -878,13 +848,13 @@ def fstat_syscall(fd):
           0,
           0,                                     # ctime ns
         )
-  if IS_CHR(findBlock(inode)['mode']):
+  if IS_CHR(blocks[inode]['mode']):
     return _istat_helper_chr_file(inode)
   return _istat_helper(inode)
 
 # private helper routine that returns stat data given an inode
 def _istat_helper(inode):
-  block = findBlock(inode)
+  block = blocks[inode]
 
   ret =  (blocks[SUPERBLOCKNUM]['devId'],          # st_dev
           inode,                                 # inode
@@ -959,7 +929,7 @@ def open_syscall(path, flags, mode):
         raise SyscallError("open_syscall","ENOENT","Path does not exist.")
 
       parentinode = path2inode[trueparentpath]
-      if not IS_DIR(findBlock(parentinode)['mode']):
+      if not IS_DIR(blocks[parentinode]['mode']):
         raise SyscallError("open_syscall","ENOTDIR","Path's parent is not a directory.")
 
       # be sure there aren't extra mode bits... No errno seems to exist for this.
@@ -987,7 +957,7 @@ def open_syscall(path, flags, mode):
       blocks[newinode] = newinodeentry
       
       # let's make the parent point to it...
-      parentBlock = findBlock(parentinode)
+      parentBlock = blocks[parentinode]
       parentBlock['filename_to_inode_dict']['f'+filename] = newinode
       # ... and increment the link count on the dir...
       parentBlock['linkcount'] += 1
@@ -1008,11 +978,11 @@ def open_syscall(path, flags, mode):
       if O_CREAT & flags and O_EXCL & flags:
         raise SyscallError("open_syscall","EEXIST","The file exists.")
       inode = path2inode[truepath]
-      block = findBlock(inode)
+      block = blocks[inode]
       if not IS_DIR(block['mode']):
         
         secondaryInode = block['location']#the block number of index block OR data
-        secondaryBlock = findBlock(secondaryInode)#the actual index block OR data
+        secondaryBlock = blocks[secondaryInode]#the actual index block OR data
 
         # If O_RDONLY is set, the behavior is undefined, so this is okay
         #If we are truncating the file, we are erasing before opening
@@ -1044,7 +1014,7 @@ def open_syscall(path, flags, mode):
 
     # Let's find the inode
     inode = path2inode[truepath]
-    block = findBlock(inode)
+    block = blocks[inode]
 
     # get the next fd so we can use it...
     thisfd = get_next_fd()
@@ -1098,7 +1068,7 @@ def lseek_syscall(fd, offset, whence):
     # we will need the file size in a moment, but also need to check the type
     try:
       inode = filedescriptortable[fd]['inode']
-      block = findBlock(inode)
+      block = blocks[inode]
     except KeyError:
       raise SyscallError("lseek_syscall","ESPIPE","This is a socket, not a file.")
     
@@ -1159,7 +1129,7 @@ def read_syscall(fd, count):
   try:
     # get the inode so I can and check the mode (type)
     inode = filedescriptortable[fd]['inode']
-    block = findBlock(inode)
+    block = blocks[inode]
 
     # If its a character file, call the helper function.
     if IS_CHR(block['mode']): return _read_chr_file(inode, count)
@@ -1184,7 +1154,7 @@ def read_syscall(fd, count):
 
       #find which block to start from and the position within that block
       startIndex,modPosition = position / BLOCKSIZE, position % BLOCKSIZE
-      blockNumbers = findBlock(block['location'])#index block = a list of numbers
+      blockNumbers = blocks[block['location']]#index block = a list of numbers
 
       for blockNum in blockNumbers[startIndex:]:
         #bytes left in this block
@@ -1231,7 +1201,7 @@ def write_syscall(fd, data):
 
     # get the inode so I can update the size (if needed) and check the type
     inode = filedescriptortable[fd]['inode']
-    block = findBlock(inode)
+    block = blocks[inode]
 
     # If its a character file, call the helper function.
     if IS_CHR(block['mode']): return _write_chr_file(inode, data)
@@ -1254,7 +1224,7 @@ def write_syscall(fd, data):
     if block['indirect']:
       #find which block to start from and the position within that block
       start,modPosition = position / BLOCKSIZE, position % BLOCKSIZE
-      index = findBlock(block['location'])
+      index = blocks[block['location']]
       lhs = 0
 
       for blockNumber in index[start:]:
@@ -1333,7 +1303,7 @@ def _close_helper(fd):
 
   # get the inode for the filedescriptor
   inode = filedescriptortable[fd]['inode']
-  block = findBlock(inode)
+  block = blocks[inode]
   # If it's not a regular file, we have nothing to close...
   if not IS_REG(block['mode']):
     # double check that this isn't in the fileobjecttable
@@ -1580,7 +1550,7 @@ def getdents_syscall(fd, quantity):
 
     # get the inode so I can read the directory entries
     inode = filedescriptortable[fd]['inode']
-    block = findBlock(inode)
+    block = blocks[inode]
     # Is it a directory?
     if not IS_DIR(block['mode']):
       raise SyscallError("getdents_syscall","EINVAL","File descriptor does not refer to a directory.")
@@ -1636,7 +1606,7 @@ def chmod_syscall(path, mode):
       raise SyscallError("chmod_syscall", "ENOENT", "The path does not exist.")
 
     inode = path2inode[truepath]
-    block = findBlock(inode)
+    block = blocks[inode]
     # be sure there aren't extra mode bits... No errno seems to exist for this
     assert(mode & (S_IRWXA|S_FILETYPEFLAGS) == mode)
 
@@ -1657,9 +1627,9 @@ def truncate_syscall(path, length):
   """
   truepath = _get_absolute_path(path)
   inode = path2inode[truepath]
-  block = findBlock(inode)
+  block = blocks[inode]
   secondaryInode = block['location']
-  if block['indirect']: secondaryInode = findBlock(secondaryInode)[0]
+  if block['indirect']: secondaryInode = blocks[secondaryInode][0]
   if secondaryInode not in fileobjecttable:
     fd = open_syscall(path, O_RDWR, S_IRWXA)
     ret = ftruncate_syscall(fd, length)
@@ -1698,7 +1668,7 @@ def ftruncate_syscall(fd, newsize,calledFromWrite=False):
     #New size of the file must not exceed the limit
     if newsize > BLOCKSIZE*NUMNUM: raise SyscallError("ftruncate_syscall","EDQUOT","File too big")
 
-    block = findBlock(inode)
+    block = blocks[inode]
     filesize = block['size']
 
     #How many blocks does the newsize need?
@@ -1744,7 +1714,7 @@ def ftruncate_syscall(fd, newsize,calledFromWrite=False):
     elif block['indirect'] == True:
       warning('was indirect and must shrink')
       indexLoc = block['location']
-      index = findBlock(indexLoc)
+      index = blocks[indexLoc]
       while len(index) > neededBlocks:
         freeBlock(index[-1])
         fileobjecttable[index[-1]].close()
@@ -1815,7 +1785,7 @@ def mknod_syscall(path, mode, dev):
   # add the major and minor device no.'s, I did it here so that the code can be managed
   # properly, instead of putting everything in open_syscall.
   inode = filedescriptortable[fd]['inode']
-  block = findBlock(inode)
+  block = blocks[inode]
   block['rdev'] = dev
  
   # close the file descriptor... 
@@ -1834,7 +1804,7 @@ def _read_chr_file(inode, count):
    helper function for reading data from chr_file's.
   """
 
-  block = findBlock(inode)
+  block = blocks[inode]
 
   # check if it's a /dev/null. 
   if block['rdev'] == (1, 3):
@@ -1854,7 +1824,7 @@ def _write_chr_file(inode, data):
   """
    helper function for writing data to chr_file's.
   """
-  block = findBlock(inode)
+  block = blocks[inode]
 
   # check if it's a /dev/null.
   if block['rdev'] == (1, 3):
@@ -1872,7 +1842,7 @@ def _write_chr_file(inode, data):
 
 
 def _istat_helper_chr_file(inode):
-  block = findBlock(inode)
+  block = blocks[inode]
   ret =  (5,          # st_dev, its always 5 for chr_file's.
           inode,                                 # inode
           block['mode'],
@@ -2006,7 +1976,7 @@ def renameHelper(dirBlock, oldPrefix, newPrefix):
       del path2inode[oldChildPath]
       path2inode[newChildPath] = inode
 
-      childBlock = findBlock(inode)
+      childBlock = blocks[inode]
       if childName.startswith('d'): renameHelper(childBlock, oldChildPath, newChildPath)
       pass
     pass
@@ -2028,7 +1998,7 @@ def rename_syscall(old, new, calledFromSelf=False):
       raise SyscallError("rename_syscall", "ENOENT", "Need new filename")
 
     inode = path2inode[true_old_path]
-    block = findBlock(inode)
+    block = blocks[inode]
 
     oldname = ('d' if IS_DIR(block['mode']) else 'f') + true_old_path.split('/')[-1]
     newname = ('d' if IS_DIR(block['mode']) else 'f') + true_new_path.split('/')[-1]
@@ -2037,7 +2007,7 @@ def rename_syscall(old, new, calledFromSelf=False):
     #if the new path already exists...
     if true_new_path in path2inode:
       existingInode = path2inode[true_new_path]
-      existingBlock = findBlock(existingInode)
+      existingBlock = blocks[existingInode]
 
       #should never happen, since if there is a path to something,
       #it has metadata, stored in the (block numbered by) inode!
@@ -2060,11 +2030,11 @@ def rename_syscall(old, new, calledFromSelf=False):
 
       trueparentpath_old = _get_absolute_parent_path(true_old_path)
       oldparentinode = path2inode[trueparentpath_old]
-      oldparentBlock = findBlock(oldparentinode)
+      oldparentBlock = blocks[oldparentinode]
 
       trueparentpath_new =  _get_absolute_parent_path(true_new_path)
       newparentinode = path2inode[trueparentpath_new]
-      newparentBlock = findBlock(newparentinode)
+      newparentBlock = blocks[newparentinode]
 
       del oldparentBlock['filename_to_inode_dict'][oldname]
       oldparentBlock['linkcount'] -= 1
