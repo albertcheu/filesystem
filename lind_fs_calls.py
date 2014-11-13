@@ -44,14 +44,22 @@ fileobjecttable = {}
 # without using global, which is blocked by RepyV2
 currentDir = {'value':'/'}
 
-#SILENT=False
-SILENT=True
+debugPos = {'value':0}
+
+SILENT=False
+#SILENT=True
 
 def warning(*msg):
   if not SILENT:
+    f = openfile("debug.log",True)
     for part in msg:
-      print part,
-    print
+      #print part,
+      content = str(part)+"\n"
+      f.writeat(content,debugPos['value'])
+      debugPos['value'] += len(content)
+      pass
+    #print
+    f.close()
 
 def persist(block, blockNum):
   '''
@@ -138,7 +146,7 @@ def load_fs(name=SUPERBLOCKFNAME):
   except FileNotFoundError, e:
     warning("Note: No filesystem found, building a fresh one.")
     _blank_fs_init()
-    load_fs_special_files()
+    #load_fs_special_files()
   else:
     f.close()
     #load the blocks!
@@ -1032,6 +1040,8 @@ def open_syscall(path, flags, mode):
 
     filedescriptortable[thisfd] = {'position':position, 'inode':inode, 'lock':createlock(), 'flags':flags&O_RDWRFLAGS}
 
+    warning('Opened file of size %d, set position to %d' % (block['size'],position))
+
     # Done!   Let's return the file descriptor.
     return thisfd
 
@@ -1142,6 +1152,8 @@ def read_syscall(fd, count):
     block['atime'] = NEW_TIME
     position = filedescriptortable[fd]['position']
 
+    warning('Reading %d bytes from %d-byte file' % (count, block['size']))
+
     #If the block is direct, just do a simple read of the bytes
     if not block['indirect']:
       dataBlockNum = block['location']
@@ -1223,21 +1235,24 @@ def write_syscall(fd, data):
     #actually write the data
     if block['indirect']:
       #find which block to start from and the position within that block
-      start,modPosition = position / BLOCKSIZE, position % BLOCKSIZE
+      startingBlock,whereInBlock = position / BLOCKSIZE, position % BLOCKSIZE
       index = blocks[block['location']]
       lhs = 0
 
-      for blockNumber in index[start:]:
+      for blockNumber in index[startingBlock:]:
         #bytes left in this block
-        bytesLeft = BLOCKSIZE - modPosition
+        bytesLeft = BLOCKSIZE - whereInBlock
         #write what needs to be written in this block -> which slice of data
-        fileobjecttable[blockNumber].writeat(data[lhs:lhs+bytesLeft],modPosition)
-        #subsequent blocks of data are written starting from the top
-        modPosition = 0
+        rhs = min(len(data), lhs+bytesLeft)
+        fileobjecttable[blockNumber].writeat(data[lhs:rhs],whereInBlock)
         #shift the slice
         lhs += bytesLeft
         #stop when we've reached the end of the data
         if lhs == len(data): break
+
+        #subsequent blocks of data are written starting from the top
+        whereInBlock = 0
+
         pass
       pass
 
@@ -1359,6 +1374,8 @@ def close_syscall(fd):
       return 0
   except KeyError:
     pass
+
+  warning('Closing file with descriptor %d' % fd)
 
   # Acquire the fd lock, if there is one.
   if 'lock' in filedescriptortable[fd]:
@@ -1625,6 +1642,7 @@ def truncate_syscall(path, length):
   """
     http://linux.die.net/man/2/truncate
   """
+  warning('Truncating file at %s to %d bytes' % (path, length))
   truepath = _get_absolute_path(path)
   inode = path2inode[truepath]
   block = blocks[inode]
@@ -1672,7 +1690,12 @@ def ftruncate_syscall(fd, newsize,calledFromWrite=False):
     filesize = block['size']
 
     #How many blocks does the newsize need?
+    #if newsize is between 0 and 4096, inclusive, need 1 block
+    #if between 4097 and 8192, inclusive, need 2 blocks
+    #etc.
+    
     neededBlocks = (newsize / BLOCKSIZE) + (1 if newsize % BLOCKSIZE else 0)
+    if newsize <= BLOCKSIZE: neededBlocks = 1
 
     warning('New size:%d, old size:%d'%(newsize,filesize))
 
