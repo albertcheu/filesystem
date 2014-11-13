@@ -7,7 +7,7 @@
 
   Heavily modified by Albert Cheu, for homework
 
-  10/11/14 - 11/09/14
+  10/11/14 - 11/12/14
 """
 BLOCKSIZE = 4096
 MAXBLOCKS = 10000
@@ -46,8 +46,8 @@ currentDir = {'value':'/'}
 
 debugPos = {'value':0}
 
-SILENT=False
-#SILENT=True
+#SILENT=False
+SILENT=True
 
 def warning(*msg):
   if not SILENT:
@@ -977,9 +977,6 @@ def open_syscall(path, flags, mode):
       # this file must not exist or it's an internal error!!!
       makeFileObject(secondaryInode)
       
-      #persist(parentBlock,parentinode)
-      #persist(newinodeentry, newinode)
-
     # if the file did exist...
     else:
       # did they use O_CREAT and O_EXCL? If so, throw error
@@ -1528,7 +1525,6 @@ def fcntl_syscall(fd, cmd, *args):
       # group (if negative).   Either way, we do nothing and return success.
       return 0
 
-
     else:
       # This is either unimplemented or malformed.   Let's raise
       # an exception.
@@ -1630,7 +1626,6 @@ def chmod_syscall(path, mode):
     # should overwrite any previous permissions, according to POSIX.   However,
     # we want to keep the 'type' part of the mode from before
     block['mode'] = (block['mode'] & ~S_IRWXA) | mode
-    #persist(block,inode)
 
   finally: theLock.release()
   return 0
@@ -1693,9 +1688,9 @@ def ftruncate_syscall(fd, newsize,calledFromWrite=False):
     #if newsize is between 0 and 4096, inclusive, need 1 block
     #if between 4097 and 8192, inclusive, need 2 blocks
     #etc.
-    
     neededBlocks = (newsize / BLOCKSIZE) + (1 if newsize % BLOCKSIZE else 0)
-    if newsize <= BLOCKSIZE: neededBlocks = 1
+    #need to take care of this case! Previous function would set variable to 0
+    if newsize == 0: neededBlocks = 1
 
     warning('New size:%d, old size:%d'%(newsize,filesize))
 
