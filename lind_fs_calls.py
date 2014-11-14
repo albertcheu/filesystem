@@ -7,7 +7,7 @@
 
   Heavily modified by Albert Cheu, for homework
 
-  10/11/14 - 11/12/14
+  10/11/14 - 11/13/14
 """
 BLOCKSIZE = 4096
 MAXBLOCKS = 10000
@@ -61,7 +61,7 @@ def warning(*msg):
     #print
     f.close()
 
-def persist(block, blockNum):
+def persistSingle(block, blockNum):
   '''
   Very important function!
   Call this function to preserve a specific block.
@@ -79,9 +79,9 @@ def persist(block, blockNum):
 #as the name suggests, only metadata is saved; actual user data
 #is saved by open/read/write/trunc syscalls
 def persist_metadata(who_needs_this_arg_question_mark):
-  def persistNode(blockNum):
+  def persistRecursive(blockNum):
     block = blocks[blockNum]
-    persist(block, blockNum)
+    persistSingle(block, blockNum)
 
     #If i am a file's inode...
     if 'indirect' in block:
@@ -89,7 +89,7 @@ def persist_metadata(who_needs_this_arg_question_mark):
       if block['indirect']:
         secondary = block['location']
         indexBlock = blocks[secondary]
-        persist(indexBlock, secondary)
+        persistSingle(indexBlock, secondary)
         pass
       #If i am a direct file inode, do nothing else!
       pass
@@ -98,18 +98,18 @@ def persist_metadata(who_needs_this_arg_question_mark):
     else:
       children = block['filename_to_inode_dict']
       for child in children:
-        if child not in ('d..','d.'): persistNode(children[child])
+        if child not in ('d..','d.'): persistRecursive(children[child])
         pass
       pass
 
     return 0
 
   #superblock & free block list
-  persist(blocks[SUPERBLOCKNUM],SUPERBLOCKNUM)
-  for i in range(STARTFREE,ENDFREE+1): persist(blocks[i],i)
+  persistSingle(blocks[SUPERBLOCKNUM],SUPERBLOCKNUM)
+  for i in range(STARTFREE,ENDFREE+1): persistSingle(blocks[i],i)
 
   #inodes, starting from root
-  persistNode(ROOTINODE)
+  persistRecursive(ROOTINODE)
   return 0
 
 # This is raised to return an error...
@@ -208,7 +208,7 @@ def _blank_fs_init():
   superblock['freeStart'] = STARTFREE
   superblock['freeEnd'] = ENDFREE
   superblock['maxBlocks'] = MAXBLOCKS
-  persist(superblock,SUPERBLOCKNUM)
+  persistSingle(superblock,SUPERBLOCKNUM)
 
   #root block
   rootblock = findBlock(ROOTINODE)
@@ -221,7 +221,7 @@ def _blank_fs_init():
   rootblock['mtime'] = DEFAULT_TIME
   rootblock['linkcount'] = 2 # the number of dir entries...
   rootblock['filename_to_inode_dict'] = {'d.':ROOTINODE,'d..':ROOTINODE}
-  persist(rootblock,ROOTINODE)
+  persistSingle(rootblock,ROOTINODE)
   path2inode['/'] = ROOTINODE
 
   #freeblocklist
@@ -242,7 +242,7 @@ def _blank_fs_init():
     blocks[i] = x
 
     #persist this block
-    persist(x,i+1)
+    persistSingle(x,i+1)
     pass    
   pass
 
@@ -324,8 +324,6 @@ def findNextFree():
       #take smallest element from the list (guaranteed to be first)
       blockNum = blocks[i][0]
       del blocks[i][0]
-      #save change to f.b.l
-      persist(blocks[i], i)
       #return the number
       return blockNum
     pass
@@ -513,7 +511,7 @@ def access_syscall(path, amode):
     # BUG: This should take the UID / GID of the requestor in mind
 
     # if all of the bits for this file are set as requested, then success
-    if blocks[inode]['mode'] & amode == amode:  return 0
+    if (blocks[inode]['mode'] & amode) == amode:  return 0
 
     raise SyscallError("access_syscall","EACESS","The requested access is denied.")
 
@@ -672,8 +670,6 @@ def link_syscall(oldpath, newpath):
     if IS_DIR(blocks[oldinode]['mode']):
       raise SyscallError("link_syscall","EPERM","Old path is a directory.")
   
-    # TODO: I should check permissions...
-
     # okay, the old path info seems fine...    
     if newpath == '':
       raise SyscallError("link_syscall","ENOENT","New path cannot exist.")
@@ -693,9 +689,6 @@ def link_syscall(oldpath, newpath):
     newparentinode = path2inode[truenewparentpath]
     if not IS_DIR(blocks[newparentinode]['mode']):
       raise SyscallError("link_syscall","ENOTDIR","New path's parent is not a directory.")
-
-
-    # TODO: I should check permissions...
 
     # okay, great!!!   We're ready to go!   Let's make the file...
     newfilename = 'f'+truenewpath.split('/')[-1]
@@ -718,18 +711,20 @@ def link_syscall(oldpath, newpath):
 ##### UNLINK  #####
 
 def freeFile(blockNum, block):
-  #Given a file's inode and its number, free the blocks
-  if block['indirect']:
+  #Given a file's inode and its number, free the used blocks
 
+  #if indirect, free index block + all the other blocks
+  if block['indirect']:
     indexBlockNum = block['location']
     index = blocks[indexBlockNum]
-
     for bN in index: freeBlock(bN)
     freeBlock(indexBlockNum)
     pass
 
+  #otherwise just free up the single data block
   else: freeBlock(block['location'])
 
+  #always free the block containing the inode
   freeBlock(blockNum)
   return 0
 
@@ -756,7 +751,6 @@ def unlink_syscall(path):
     if IS_DIR(thisBlock['mode']):
       raise SyscallError("unlink_syscall","EISDIR","Path is a directory.")
 
-    # TODO: I should check permissions...
     trueparentpath = _get_absolute_parent_path(path)
     parentinode = path2inode[trueparentpath]
     parentBlock = blocks[parentinode]
@@ -778,12 +772,12 @@ def unlink_syscall(path):
 
     # If zero, remove the entry
     if thisBlock['linkcount'] == 0:
+      #weird case when deleting file while it is open
+      #who does this? whatever
+      fds = _lookup_fds_by_inode(inode)
+      for fd in fds: del filedescriptortable[fd]
+      _close_body(thisBlock)
       freeFile(thisinode,thisBlock)
-
-      if thisinode in fileobjecttable:
-        #fileobjecttable[thisinode].close()
-        #del fileobjecttable[thisinode]
-        pass
       pass
 
     return 0
@@ -1227,7 +1221,7 @@ def write_syscall(fd, data):
     warning('Our current file size is %d' % block['size'])
 
     #resize
-    if len(data)+position != block['size']: ftruncate_syscall(fd,len(data)+position,True)
+    if len(data)+position != block['size']: resize(block,len(data)+position)
 
     #actually write the data
     if block['indirect']:
@@ -1340,9 +1334,15 @@ def _close_helper(fd):
 
   #no file objects to close
   if IS_DIR(block['mode']): pass
+  else: _close_body(block)
 
-  # now let's close it and remove it from the table
-  elif block['indirect']:
+  # success!
+  return 0
+
+def _close_body(block):
+  #The meat of _close_helper
+  #let's close it and remove it from the table
+  if block['indirect']:
     indexLoc = block['location']
     index = blocks[indexLoc]
     for blockNum in index:
@@ -1356,7 +1356,6 @@ def _close_helper(fd):
     del fileobjecttable[block['location']]
     pass
 
-  # success!
   return 0
 
 def close_syscall(fd):
@@ -1397,8 +1396,7 @@ def _dup2_helper(oldfd,newfd):
   # NOTE: I want to support dup2 being used to replace STDERR, STDOUT, etc.
   #      The Lind code may pass me descriptors less than STARTINGFD
   if newfd >= MAX_FD or newfd < 0:
-    # BUG: the STARTINGFD isn't really too low.   It's just lower than we
-    # support
+    # BUG: the STARTINGFD isn't really too low.   It's just lower than we support
     raise SyscallError("dup2_syscall","EBADF","Invalid new file descriptor.")
 
   # if they are equal, return them
@@ -1654,12 +1652,82 @@ def truncate_syscall(path, length):
 
   return ret
 
-
 #### FTRUNCATE ####
-def ftruncate_syscall(fd, newsize,calledFromWrite=False):
+def resize(block, newsize):
+  warning('Resizing a file to %d bytes' % newsize)
+  oldsize = block['size']
+  #How many blocks does the newsize need?
+  #if newsize is between 0 and 4096, inclusive, need 1 block
+  #if between 4097 and 8192, inclusive, need 2 blocks
+  #etc.
+  neededBlocks = (newsize / BLOCKSIZE) + (1 if newsize % BLOCKSIZE else 0)
+  #need to take care of this case! Previous function would set variable to 0
+  if newsize == 0: neededBlocks = 1
+
+  warning('New size:%d, old size:%d'%(newsize,oldsize))
+
+  #If new size of file is bigger than current one...
+  if newsize > oldsize:
+    warning('ftruncate will grow file')
+    #direct stays as direct if the new size fits in one block
+    #happily, unused bytes in the block are already \0
+    if newsize <= BLOCKSIZE:
+      warning('oldsize < newsize <= BLOCKSIZE, so only change size variable')
+      pass
+    else:
+      #if we're a direct block, change to indirect
+      if not block['indirect']:
+        warning("if we're a direct block, change to indirect")
+        block['indirect'] = True
+        #'location' slot in block now points to the index block
+        #old data remains, but pointed to by the index block
+        oldLoc = block['location']
+        indexLoc = allocate()#where the index block will be
+        block['location'] = indexLoc
+        blocks[indexLoc] = [oldLoc]#index = list of numbers
+        pass
+
+      #Add needed blocks
+      indexLoc = block['location']
+      index = blocks[indexLoc]
+      while len(index) < neededBlocks:
+        index.append(allocate())
+        makeFileObject(index[-1])#pre-filled with zeroes
+        pass
+      pass
+    pass
+
+  #Otherwise, shrink
+  #clip off excess blocks
+  elif block['indirect'] == True:
+    warning('was indirect and must shrink')
+    indexLoc = block['location']
+    index = blocks[indexLoc]
+    while len(index) > neededBlocks:
+      freeBlock(index[-1])
+      fileobjecttable[index[-1]].close()
+      del fileobjecttable[index[-1]]
+      index.pop()
+      pass
+    if len(index) == 1:
+      warning('changing from indirect to direct')
+      block['indirect'] = False
+      block['location'] = index[0]
+      freeBlock(indexLoc)
+      pass
+    pass
+
+  else: warning('newsize <= oldsize <= BLOCKSIZE, so only change size variable')
+
+  block['size'] = newsize
+  pass
+
+def ftruncate_syscall(fd, newsize):
+
   """
     http://linux.die.net/man/2/ftruncate
   """
+
   # check the fd
   if fd not in filedescriptortable and fd >= STARTINGFD:
     raise SyscallError("ftruncate_syscall","EBADF","Invalid old file descriptor.")
@@ -1669,9 +1737,8 @@ def ftruncate_syscall(fd, newsize,calledFromWrite=False):
 
   desc = filedescriptortable[fd]
   
-  warning('This ftruncate call was started by write_syscall.',calledFromWrite)
   # Acquire the fd lock
-  if not calledFromWrite: desc['lock'].acquire(True)
+  desc['lock'].acquire(True)
 
   try: 
     # we will need the file size in a moment, but also need to check the type
@@ -1682,80 +1749,12 @@ def ftruncate_syscall(fd, newsize,calledFromWrite=False):
     if newsize > BLOCKSIZE*NUMNUM: raise SyscallError("ftruncate_syscall","EDQUOT","File too big")
 
     block = blocks[inode]
-    filesize = block['size']
-
-    #How many blocks does the newsize need?
-    #if newsize is between 0 and 4096, inclusive, need 1 block
-    #if between 4097 and 8192, inclusive, need 2 blocks
-    #etc.
-    neededBlocks = (newsize / BLOCKSIZE) + (1 if newsize % BLOCKSIZE else 0)
-    #need to take care of this case! Previous function would set variable to 0
-    if newsize == 0: neededBlocks = 1
-
-    warning('New size:%d, old size:%d'%(newsize,filesize))
-
-    #If new size of file is bigger than current one...
-    if newsize > filesize:
-      warning('ftruncate will grow file')
-
-      #direct stays as direct if the new size fits in one block
-      #happily, unused bytes in the block are already \0
-      if newsize <= BLOCKSIZE:
-        warning('filesize < newsize <= BLOCKSIZE, so only change size variable')
-        pass
-
-      else:
-        #if we're a direct block, change to indirect
-        if not block['indirect']:
-          warning("if we're a direct block, change to indirect")
-          block['indirect'] = True
-          #'location' slot in block now points to the index block
-          #old data remains, but pointed to by the index block
-          oldLoc = block['location']
-          indexLoc = allocate()#where the index block will be
-          block['location'] = indexLoc
-          blocks[indexLoc] = [oldLoc]#index = list of numbers
-          pass
-
-        #Add needed blocks
-        indexLoc = block['location']
-        index = blocks[indexLoc]
-        while len(index) < neededBlocks:
-          index.append(allocate())
-          makeFileObject(index[-1])#pre-filled with zeroes
-          pass
-        pass
-      pass
-
-    #Otherwise, shrink
-    #clip off excess blocks
-    elif block['indirect'] == True:
-      warning('was indirect and must shrink')
-      indexLoc = block['location']
-      index = blocks[indexLoc]
-      while len(index) > neededBlocks:
-        freeBlock(index[-1])
-        fileobjecttable[index[-1]].close()
-        del fileobjecttable[index[-1]]
-        index.pop()
-        pass
-      if len(index) == 1:
-        warning('changing from indirect to direct')
-        block['indirect'] = False
-        block['location'] = index[0]
-        freeBlock(indexLoc)
-        pass
-      pass
-
-    #newsize <= filesize, and direct
-    else: warning('newsize <= filesize <= BLOCKSIZE, so only change size variable')
-
-    block['size'] = newsize
+    resize(block, newsize)
     pass
 
   finally:
     desc = filedescriptortable[fd]
-    if not calledFromWrite: desc['lock'].release()     
+    desc['lock'].release()     
     pass
 
   return 0
