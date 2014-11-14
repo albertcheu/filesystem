@@ -772,11 +772,15 @@ def unlink_syscall(path):
 
     # If zero, remove the entry
     if thisBlock['linkcount'] == 0:
+
       #weird case when deleting file while it is open
       #who does this? whatever
       fds = _lookup_fds_by_inode(inode)
-      for fd in fds: del filedescriptortable[fd]
-      _close_body(thisBlock)
+      if len(fds):
+        for fd in fds: del filedescriptortable[fd]
+        _close_body(thisBlock)
+        pass
+
       freeFile(thisinode,thisBlock)
       pass
 
@@ -888,8 +892,8 @@ def get_next_fd():
   raise SyscallError("open_syscall","EMFILE","The maximum number of files are open.")
 
 def makeFileObject(blockNum):
-  #Given the number of a block that contains a file's data,
-  #create repy file object for that block (to hold piece of the data)
+  #Given the number of a block that contains a piece of file's data,
+  #create repy file object for that piece
 
   # if it exists, close the existing file object so I can remove it...
   if blockNum in fileobjecttable: fileobjecttable[blockNum].close()
@@ -897,7 +901,7 @@ def makeFileObject(blockNum):
   try: removefile(PREFIX+str(blockNum))
   except: pass
 
-  # always open the file.
+  # always open the file
   fileobjecttable[blockNum] = openfile(PREFIX+str(blockNum),True)
   fileobjecttable[blockNum].writeat('\0'*BLOCKSIZE,0)
   pass
@@ -1008,7 +1012,6 @@ def open_syscall(path, flags, mode):
           pass
         pass
 
-    # TODO: I should check permissions...
     # At this point, the file will exist... 
 
     # Let's find the inode
@@ -1026,7 +1029,6 @@ def open_syscall(path, flags, mode):
     # else, let's start at the beginning
     position = block['size'] if (O_APPEND & flags) else 0
 
-    # TODO handle read / write locking, etc.
     # Add the entry to the table!
 
     filedescriptortable[thisfd] = {'position':position, 'inode':inode, 'lock':createlock(), 'flags':flags&O_RDWRFLAGS}
@@ -1220,7 +1222,7 @@ def write_syscall(fd, data):
     warning('We are writing %d bytes starting from position %d' % (len(data), position))
     warning('Our current file size is %d' % block['size'])
 
-    #resize
+    #resize if necessary
     if len(data)+position != block['size']: resize(block,len(data)+position)
 
     #actually write the data
@@ -1340,8 +1342,8 @@ def _close_helper(fd):
   return 0
 
 def _close_body(block):
-  #The meat of _close_helper
-  #let's close it and remove it from the table
+  #The meat of _close_helper pulled out, so unlink can use this
+
   if block['indirect']:
     indexLoc = block['location']
     index = blocks[indexLoc]
@@ -1629,19 +1631,19 @@ def chmod_syscall(path, mode):
   return 0
 
 #### TRUNCATE  ####
-
-
 def truncate_syscall(path, length):
   """
     http://linux.die.net/man/2/truncate
   """
+
   warning('Truncating file at %s to %d bytes' % (path, length))
   truepath = _get_absolute_path(path)
   inode = path2inode[truepath]
   block = blocks[inode]
-  secondaryInode = block['location']
-  if block['indirect']: secondaryInode = blocks[secondaryInode][0]
-  if secondaryInode not in fileobjecttable:
+  secondaryNum = block['location']
+  if block['indirect']: secondaryNum = blocks[secondaryNum][0]
+
+  if secondaryNum not in fileobjecttable:
     fd = open_syscall(path, O_RDWR, S_IRWXA)
     ret = ftruncate_syscall(fd, length)
     close_syscall(fd)
@@ -1654,12 +1656,13 @@ def truncate_syscall(path, length):
 
 #### FTRUNCATE ####
 def resize(block, newsize):
+  #This operation is pulled from ftruncate to allow calls from write
   warning('Resizing a file to %d bytes' % newsize)
   oldsize = block['size']
+
   #How many blocks does the newsize need?
   #if newsize is between 0 and 4096, inclusive, need 1 block
-  #if between 4097 and 8192, inclusive, need 2 blocks
-  #etc.
+  #if between 4097 and 8192, inclusive, need 2 blocks, etc.
   neededBlocks = (newsize / BLOCKSIZE) + (1 if newsize % BLOCKSIZE else 0)
   #need to take care of this case! Previous function would set variable to 0
   if newsize == 0: neededBlocks = 1
@@ -1669,11 +1672,13 @@ def resize(block, newsize):
   #If new size of file is bigger than current one...
   if newsize > oldsize:
     warning('ftruncate will grow file')
+
     #direct stays as direct if the new size fits in one block
     #happily, unused bytes in the block are already \0
     if newsize <= BLOCKSIZE:
       warning('oldsize < newsize <= BLOCKSIZE, so only change size variable')
       pass
+
     else:
       #if we're a direct block, change to indirect
       if not block['indirect']:
@@ -1687,7 +1692,7 @@ def resize(block, newsize):
         blocks[indexLoc] = [oldLoc]#index = list of numbers
         pass
 
-      #Add needed blocks
+      #Add needed blocks to list
       indexLoc = block['location']
       index = blocks[indexLoc]
       while len(index) < neededBlocks:
@@ -1697,18 +1702,20 @@ def resize(block, newsize):
       pass
     pass
 
-  #Otherwise, shrink
-  #clip off excess blocks
+  #Clip off excess blocks of our index, if any
   elif block['indirect'] == True:
-    warning('was indirect and must shrink')
+    warning('Was indirect and must shrink')
+
     indexLoc = block['location']
     index = blocks[indexLoc]
+
     while len(index) > neededBlocks:
       freeBlock(index[-1])
       fileobjecttable[index[-1]].close()
       del fileobjecttable[index[-1]]
       index.pop()
       pass
+
     if len(index) == 1:
       warning('changing from indirect to direct')
       block['indirect'] = False
@@ -1748,8 +1755,8 @@ def ftruncate_syscall(fd, newsize):
     #New size of the file must not exceed the limit
     if newsize > BLOCKSIZE*NUMNUM: raise SyscallError("ftruncate_syscall","EDQUOT","File too big")
 
-    block = blocks[inode]
-    resize(block, newsize)
+    #Do the resizing
+    resize(blocks[inode], newsize)
     pass
 
   finally:
