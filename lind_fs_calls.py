@@ -1,12 +1,5 @@
 """
-  Author: Justin Cappos
-  Module: File system calls for Lind.   This is essentially POSIX written in
-          Repy V2.   
-
-  Start Date: December 17th, 2011
-
-  Heavily modified by Albert Cheu, for homework
-
+  Albert Cheu N15149196
   10/11/14 - 11/13/14
 """
 BLOCKSIZE = 4096
@@ -775,7 +768,7 @@ def unlink_syscall(path):
 
       #weird case when deleting file while it is open
       #who does this? whatever
-      fds = _lookup_fds_by_inode(inode)
+      fds = _lookup_fds_by_inode(thisinode)
       if len(fds):
         for fd in fds: del filedescriptortable[fd]
         _close_body(thisBlock)
@@ -2067,7 +2060,10 @@ def rename_syscall(old, new, calledFromSelf=False):
       newparentBlock['linkcount'] += 1
 
       #all keys in path2inode starting with true_old_path are changed to start with true_new_path
-      if IS_DIR(block['mode']): renameHelper(block, true_old_path, true_new_path)
+      if IS_DIR(block['mode']):
+        block['filename_to_inode_dict']['d..'] = newparentinode
+        renameHelper(block, true_old_path, true_new_path)
+        pass
 
   finally:
     if not calledFromSelf: theLock.release()
